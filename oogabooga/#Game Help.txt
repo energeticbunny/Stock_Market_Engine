@@ -1,0 +1,92 @@
+#Game Help
+
+    @commands.command(name='game-help', aliases=["help"], help='Display available commands for Discord $QSE.')
+    async def game_help(self, ctx):
+        stocks_help = """
+    View stocks you hold
+    ```!my_stocks```
+
+    View current stocks
+    ```!stocks```
+    ```!list_stocks```
+
+    View specific stock info
+    ```!stock_metric P3:BANK```
+
+    Buy stocks, stock name, stock quantity
+    ```!buy P3:BANK 100```
+
+    Sell stocks, stock name, stock quantity
+    ```!sell P3:BANK 100```
+    """
+
+        etfs_help = """
+    List ETF's
+    ```!list_etfs```
+
+    List your ETF's
+    ```!my_etfs```
+
+    Buy ETF
+    ```!buy_etf id amount```
+    ```!buy_etf 1 1```
+
+    Sell ETF
+    ```!sell_etf id amount```
+    ```!sell_etf 1 1```
+
+    List ETF Details
+    ```!etf_info [etfID]```
+    ```!etf_info 1```
+    """
+
+        addr_help = """
+    Store P3 Address
+    ```!store_addr```
+
+    View P3 Addr
+    ```!my_addr```
+
+    View Stats
+    ```!stats```
+
+    View Stock Chart
+    ```!chart BlueChipOG```
+    ```!chart P3:BANK```
+    """
+
+
+        embeds = [
+            Embed(title="Stocks Related Commands", description=stocks_help, color=0x0099FF),
+            Embed(title="ETF Related Commands", description=etfs_help, color=0x00FF00),
+            Embed(title="Address and General Help", description=addr_help, color=0x00FF00),
+        ]
+
+        current_page = 0
+        message = await ctx.send(embed=embeds[current_page])
+
+        # Add reactions for pagination
+        reactions = ['⏪', '⏩']
+        for reaction in reactions:
+            await message.add_reaction(reaction)
+
+        def check(reaction, user):
+            return user == ctx.author and reaction.message.id == message.id and str(reaction.emoji) in reactions
+
+        while True:
+            try:
+                reaction, user = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
+            except TimeoutError:
+                break
+
+            if str(reaction.emoji) == '⏪':
+                current_page -= 1
+            elif str(reaction.emoji) == '⏩':
+                current_page += 1
+
+            current_page %= len(embeds)
+            await message.edit(embed=embeds[current_page])
+            await message.remove_reaction(reaction, user)
+
+        await message.clear_reactions()
+

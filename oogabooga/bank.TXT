@@ -1,0 +1,179 @@
+## Bank Engine
+
+
+
+async def create_bank(self, bank_name):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO banks (bank_name, qse_stored, stock_value_stored)
+            VALUES (?, 0.0, 0.0)
+        """, (bank_name,))
+        self.conn.commit()
+        return f"Bank '{bank_name}' created successfully."
+    except sqlite3.Error as e:
+        return f"Error creating bank: {e}"
+
+async def show_all_banks(self):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT bank_id, bank_name FROM banks")
+        banks = cursor.fetchall()
+
+        if banks:
+            print("Banks:")
+            for bank_id, bank_name in banks:
+                print(f"Bank ID: {bank_id}, Bank Name: {bank_name}")
+        else:
+            print("No banks found.")
+    except sqlite3.Error as e:
+        print(f"An error occurred while retrieving banks: {str(e)}")
+
+async def create_user_account(self, ctx, bank_id):
+    try:
+        cursor = self.conn.cursor()
+        user_id = ctx.author.id
+
+        # Check if the user already has an account
+        cursor.execute("SELECT * FROM user_accounts WHERE user_id = ? AND bank_id = ?", (user_id, bank_id))
+        existing_account = cursor.fetchone()
+
+        if existing_account:
+            return "User already has an account."
+
+        # If no existing account, create a new one
+        cursor.execute("""
+            INSERT INTO user_accounts (user_id, bank_id, qse_balance, stock_assets)
+            VALUES (?, ?, 0.0, '')
+        """, (user_id, bank_id))
+
+        self.conn.commit()
+        return "User account created successfully."
+
+    except sqlite3.Error as e:
+        return f"Error creating user account: {e}"
+
+async def deposit_qse(self, ctx, bank_id, amount):
+    try:
+        cursor = self.conn.cursor()
+        user_id = ctx.author.id
+
+        # Check if the user already has an account
+        cursor.execute("SELECT * FROM user_accounts WHERE user_id = ? AND bank_id = ?", (user_id, bank_id))
+        existing_account = cursor.fetchone()
+
+        if existing_account:
+
+            cursor.execute("""
+                UPDATE user_accounts
+                SET qse_balance = qse_balance + ?
+                WHERE user_id = ? AND bank_id = ?
+            """, (amount, user_id, bank_id))
+            self.conn.commit()
+            return f"Deposited {amount:,.0f} QSE successfully."
+        else:
+            return f"No account found for this bank"
+    except sqlite3.Error as e:
+        return f"Error depositing QSE: {e}"
+
+async def deposit_stock_assets(self, ctx, bank_id, assets):
+    try:
+        cursor = self.conn.cursor()
+        user_id = ctx.author.id
+        cursor.execute("""
+            UPDATE user_accounts
+            SET stock_assets = ?
+            WHERE user_id = ? AND bank_id = ?
+        """, (assets, user_id, bank_id))
+        self.conn.commit()
+        return "Deposited stock assets successfully."
+    except sqlite3.Error as e:
+        return f"Error depositing stock assets: {e}"
+
+async def withdraw_qse(self, ctx, bank_id, amount):
+    try:
+        cursor = self.conn.cursor()
+        user_id = ctx.author.id
+        # Check if the user already has an account
+        cursor.execute("SELECT * FROM user_accounts WHERE user_id = ? AND bank_id = ?", (user_id, bank_id))
+        existing_account = cursor.fetchone()
+
+        if existing_account:
+            current_qse_balance = existing_account[3]
+
+            # Check if the withdrawal amount is greater than the current balance
+            if amount > current_qse_balance:
+                return "Withdrawal amount exceeds the current QSE balance. Cannot withdraw."
+
+            # Update the QSE balance
+            cursor.execute("""
+                UPDATE user_accounts
+                SET qse_balance = qse_balance - ?
+                WHERE user_id = ? AND bank_id = ?
+            """, (amount, user_id, bank_id))
+            self.conn.commit()
+            await self.send_from_reserve(ctx, ctx.author.id, int(amount))
+            return f"Withdrew {amount:,.0f} QSE successfully."
+        else:
+            return "No account found for this bank"
+    except sqlite3.Error as e:
+        return f"Error withdrawing QSE: {e}"
+
+async def withdraw_stock_assets(self, ctx, bank_id):
+    try:
+        cursor = self.conn.cursor()
+        user_id = ctx.author.id
+        cursor.execute("""
+            UPDATE user_accounts
+            SET stock_assets = ''
+            WHERE user_id = ? AND bank_id = ?
+        """, (user_id, bank_id))
+        self.conn.commit()
+        return "Withdrawn stock assets successfully."
+    except sqlite3.Error as e:
+        return f"Error withdrawing stock assets: {e}"
+
+async def view_account(self, ctx, bank_id):
+    try:
+        cursor = self.conn.cursor()
+        user_id = ctx.author.id
+        cursor.execute("""
+            SELECT * FROM user_accounts
+            WHERE user_id = ? AND bank_id = ?
+        """, (user_id, bank_id))
+        account_data = cursor.fetchone()
+        if account_data:
+            qse_balance = int(account_data[3])
+            formatted_qse_balance = f"{qse_balance:,.0f}"
+
+            embed = Embed(
+                title=f"Account Information for User {get_p3_address(self.P3addrConn, user_id)}",
+                description=f"Bank: P3:Bank",
+                color=0x00ff00
+            )
+            embed.add_field(name="QSE Balance", value=formatted_qse_balance)
+            embed.add_field(name="Stock Assets", value=account_data[4])
+            return embed
+        else:
+            return "User account not found."
+    except sqlite3.Error as e:
+        return f"Error viewing account: {e}"
+
+async def get_total_qse_deposited(self):
+    try:
+        cursor = self.conn.cursor()
+
+        # Summing up the QSE balance for all accounts
+        cursor.execute("""
+            SELECT SUM(qse_balance) FROM user_accounts
+        """)
+        total_qse_deposited = cursor.fetchone()[0]
+
+        if total_qse_deposited is not None:
+            return total_qse_deposited
+        else:
+            return 0  # Return 0 if there are no accounts with deposited QSE
+
+    except sqlite3.Error as e:
+        return f"Error getting total QSE deposited: {e}"
+

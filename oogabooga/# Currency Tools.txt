@@ -1,0 +1,218 @@
+# Currency Tools
+
+    @commands.command(name="report", help="Report bugs or issues with the bot.")
+    async def report(self, ctx, *, issue=None):
+        if issue is None:
+            await ctx.send("Please provide an issue in quotations. Example: `!report \"There is an issue with...\"`")
+            return
+
+        # Get timestamp in EST
+        timestamp_est = ctx.message.created_at.astimezone(timezone(timedelta(hours=-5)))
+
+        # Create a link to the message
+        message_link = f"https://discord.com/channels/{ctx.guild.id}/{ctx.channel.id}/{ctx.message.id}"
+
+        # Notify user in an embed
+        embed = discord.Embed(
+            title="Report Submitted",
+            description=f"Thank you for reporting the issue! An admin will check it at the earliest convenience.",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Issue", value=issue, inline=False)
+        embed.add_field(name="Timestamp (EST)", value=timestamp_est.strftime("%Y-%m-%d %H:%M:%S"), inline=False)
+        embed.add_field(name="Report Link", value=message_link, inline=False)
+
+        # Send the embed to the channel
+        await ctx.send(embed=embed)
+
+        # Send report to admin
+        admin_user_id = 930513222820331590  # Replace with your admin user ID
+        admin = await self.bot.fetch_user(admin_user_id)
+        admin_message = f"New report from {ctx.author.name} ({ctx.author.id}):\n\n**Issue:** {issue}\n**Timestamp (EST):** {timestamp_est.strftime('%Y-%m-%d %H:%M:%S')}\n**Report Link:** {message_link}"
+        await admin.send(admin_message)
+        await admin.send(embed=embed)
+
+        await ctx.send("Your report has been submitted. Thank you!")
+
+    async def handle_burn_transaction(self, ctx, sender_id, amount):
+        # Deduct the tokens from the sender's balance (burn)
+        await update_user_balance(self.conn, sender_id, get_user_balance(self.conn, sender_id) - amount)
+        await update_user_balance(self.conn, PBot, get_user_balance(self.conn, PBot) - amount)
+
+        # Log the burn transfer
+        await log_transfer(self, ledger_conn, ctx, ctx.author.name, "p3:0x0000burn", get_user_id(self.P3addrConn, self.bot_address), amount, is_burn=True)
+        await log_transfer(self, ledger_conn, ctx, ctx.bot.user.name, "p3:0x0000burn", get_user_id(self.P3addrConn, self.bot_address), amount, is_burn=True)
+
+        # Calculate ticket amount
+        is_staking_qse_genesis = self.is_staking_qse_genesis(sender_id)
+        if is_staking_qse_genesis:
+            ticket_amount = (amount * 2.5)
+        else:
+            ticket_amount = amount
+
+        # Update ticket data
+        ticket_data = await get_ticket_data(self.conn, sender_id)
+        if ticket_data is None:
+            await update_ticket_data(self.conn, sender_id, ticket_amount, int(time.time()))
+        else:
+            ticket_quantity, _ = ticket_data
+            await update_ticket_data(self.conn, sender_id, ticket_quantity + ticket_amount, int(time.time()))
+
+        # Send response
+        await ctx.send(f"{amount:,.0f} $QSE has been burned, received {ticket_amount:,.0f} Lottery tickets")
+        print(f"{get_p3_address(self.P3addrConn, sender_id)} burned {amount:,.0f} $QSE Token")
+
+
+
+    @commands.command(name="give", help="Give a specified amount of $QSE to another user.")
+    @is_not_allowed_user(1224458697728593962, 1224461917448437892, 1224463766956015670, 1224465106835083348)
+    async def give_addr(self, ctx, target, amount: int, verbose: bool = True):
+        sender_id = ctx.author.id
+        sender_balance = get_user_balance(self.conn, sender_id)
+
+        if amount <= 0:
+            return
+
+        if sender_balance < amount:
+            await ctx.send(f"{ctx.author.mention}, you don't have enough $QSE to give. Your current balance is {sender_balance:,.2f} $QSE.")
+            return
+
+        # Check if the target address is the burn address
+        if target.lower() == "p3:0x0000burn":
+            # Deduct the tokens from the sender's balance (burn)
+            await self.handle_burn_transaction(ctx, sender_id, amount)
+            return
+
+        if target.startswith("P3:"):
+            p3_address = target
+            user_id = get_user_id(self.P3addrConn, p3_address)
+
+            if not user_id:
+                await ctx.send("Invalid or unknown P3 address.")
+                return
+        else:
+            await ctx.send("Please provide a valid P3 address.")
+            return
+
+        recipient_balance = get_user_balance(self.conn, user_id)
+
+        # Apply tax for transfers
+        transfer_amount = amount
+
+        if transfer_amount > 9_000_000_000_000_000_000:
+            chunks = (int(transfer_amount) + 99_999_999_999_999_999_999) // 9_000_000_000_000_000_000
+            chunk_amount = int(transfer_amount) // chunks
+
+        else:
+            chunks = 1
+            chunk_amount = transfer_amount
+
+        # Deduct the total amount from the sender's balance
+        await update_user_balance(self.conn, sender_id, sender_balance - transfer_amount)
+
+        # Add the total transfer amount to the recipient's balance
+        await update_user_balance(self.conn, user_id, recipient_balance + transfer_amount)
+
+        # Log the transfer for each chunk
+        for _ in range(chunks):
+            await log_transfer(self, ledger_conn, ctx, ctx.author.name, target, user_id, chunk_amount)
+
+        if verbose:
+            await ctx.send(f"{ctx.author.mention}, you have successfully given {amount:,.0f} $QSE to {target}.")
+        return
+
+
+
+
+    @commands.command(name="daily", help="Claim your daily $QSE.")
+    @is_allowed_server(1161678765894664323, 1087147399371292732)
+    @is_not_allowed_user(1224458697728593962, 1224461917448437892, 1224463766956015670, 1224465106835083348)
+    async def daily(self, ctx):
+        await check_store_addr(self, ctx)
+        async with self.lock:  # Use the asynchronous lock
+            user_id = ctx.author.id
+            if ctx.author.id in self.blacklisted:
+                await ctx.send("Your address has been blacklisted")
+                return
+            # If the user hasn't claimed or 24 hours have passed since the last claim
+        member = ctx.guild.get_member(user_id)
+        current_time = datetime.now()
+        if user_id not in self.last_claimed or (current_time - self.last_claimed[user_id]).total_seconds() > 86400:
+
+            stake_rewards = await calculate_daily_staking_reward(self, user_id)
+            derivatives = await reward_stock_holder_auto(self, ctx, user_id, "DiamondCoin", 0.0064)
+#            stable_rewards = 0
+            stocks = await get_etf_stocks(self, 13)
+            total_yield = 0
+            for stock in stocks:
+
+                yields = await reward_stock_holder_auto(self, ctx, user_id, stock, 0.0064)
+                print(f"Derivatives: {stock}({yields:,.0f}) -> {get_p3_address(self.P3addrConn, user_id)}")
+                total_yield += yields
+
+
+
+            if has_role(member, bronze_pass):
+                amount = random.randint(dailyMin * 2, dailyMax * 2)
+            else:
+                amount = random.randint(dailyMin, dailyMax)
+            current_balance = get_user_balance(self.conn, user_id)
+            new_balance = current_balance + (int(amount) + int(stake_rewards))
+
+            # Deduct the amount from the bot's balance
+            bot_balance = get_user_balance(self.conn, self.bot.user.id)
+            await update_user_balance(self.conn, self.bot.user.id, bot_balance - (int(amount) + int(stake_rewards)))
+
+            # Log the transfer from the bot to the user
+            await log_transfer(self, ledger_conn, ctx, "P3 Bot", ctx.author.name, user_id, (int(amount) + int(stake_rewards)))
+
+            await update_user_balance(self.conn, user_id, new_balance)
+            await add_experience(self, self.conn, ctx.author.id, 10, ctx)
+            result = await self.daily_resource(ctx)
+            resource = result if result else 0
+
+            await send_claim_message(self, ctx, amount, stake_rewards, resource, derivatives, total_yield, new_balance)
+
+#            await ctx.send(f"{ctx.author.mention},\n You have claimed {amount:,.0f} $QSE from Reserve Grants\n\nClaimed {stake_rewards:,.0f} $QSE from staking rewards\n\nClaimed {resource:,.0f} Gold from Penthouses\n\nClaimed {derivatives:,.0f} shares of DiamondCoin @ 2.33% APY\n\nClaimed {total_yield:,.0f} shares from Derivatives @ 2.33% APY\n\nClaimed {stable_rewards:,.0f} shares of P3:Stable @ 2,555% APY\n\nAwarded 10 XP\n\nYour new balance is: {new_balance:,.0f} $QSE.")
+
+            self.last_claimed[user_id] = current_time  # Update the last claimed time
+        else:
+            time_left = 86400 - (current_time - self.last_claimed[user_id]).total_seconds()
+            hours, remainder = divmod(time_left, 3600)
+            minutes, _ = divmod(remainder, 60)
+            await ctx.send(f"You've already claimed your daily reward! You can claim again in {int(hours)} hours and {int(minutes)} minutes.")
+
+
+
+
+    @commands.command(name="balance", aliases=["wallet"], help="Check your balance.")
+    async def balance(self, ctx):
+        await ctx.message.delete()
+        user_id = ctx.author.id
+        P3Addr = generate_crypto_address(ctx.author.id)
+        balance = get_user_balance(self.conn, user_id)
+
+        # Format balance with commas and make it more visually appealing
+        formatted_balance = "{:,}".format(balance)
+        formatted_balance = f"**{formatted_balance}** $QSE"
+
+        embed = discord.Embed(
+            title="Balance",
+            description=f"Balance for {P3Addr}:",
+            color=discord.Color.blue()
+        )
+        embed.set_thumbnail(url="https://mirror.xyz/_next/image?url=https%3A%2F%2Fimages.mirror-media.xyz%2Fpublication-images%2F8XKxIUMy9CE8zg54-ZsP3.png&w=828&q=75")  # Add your own coin icon URL
+        embed.add_field(name="$QSE", value=formatted_balance, inline=False)
+        embed.set_footer(text="Thank you for using our currency system!")
+
+        await ctx.send(embed=embed)
+
+    @commands.command(name="add")
+    @is_allowed_user(930513222820331590, PBot)
+    async def add(self, ctx, amount: int):
+        await ctx.message.delete()
+        user_id = ctx.author.id
+        current_balance = get_user_balance(self.conn, user_id)
+        new_balance = current_balance + amount
+        await update_user_balance(self.conn, user_id, new_balance)
+        await ctx.send(f"{ctx.author.mention}, you have added {amount:,.2f} $QSE. Your new balance is: {new_balance:,.2f} $QSE.")

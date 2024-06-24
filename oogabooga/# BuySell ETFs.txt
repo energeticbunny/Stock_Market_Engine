@@ -1,0 +1,273 @@
+# Buy/Sell ETFs
+    @commands.command(name="buy_etf", help="Buy an ETF. Provide the ETF ID and quantity.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def buy_etf(self, ctx, etf_id: int, quantity: int):
+        etf_buyable = ['1', '13', '14', '4', '15']
+        await ctx.message.delete()
+#        await ctx.send("ETF Purchases are temporaily blocked, ETF sells allowed")
+#        return
+        if etf_id in etf_buyable:
+            etf_shares = await get_available_etf_shares(self, etf_id)
+        else:
+            await ctx.send(f"ETF {etf_id} not buyable")
+            return
+        etf_shares = await get_available_etf_shares(self, etf_id)
+        current_timestamp = datetime.utcnow()
+        user_id = ctx.author.id
+        P3addrConn = sqlite3.connect("P3addr.db")
+        P3addr = get_p3_address(P3addrConn, user_id)
+        # Fetch the ETF's value and calculate the total cost
+        etf_value = await get_etf_value(self, ctx, etf_id)
+
+        color = discord.Color.green()
+        embed = discord.Embed(title=f"ETP Transaction Processing", color=color)
+        embed.add_field(name="Address:", value=f"{P3addr}", inline=False)
+        embed.add_field(name="ETF:", value=f"{etf_id}", inline=False)
+        embed.add_field(name="Amount:", value=f"{quantity:,.2f}", inline=False)
+        embed.add_field(name="Value:", value=f"{etf_value:,.2f} $QSE", inline=False)
+        embed.set_footer(text=f"Timestamp: {current_timestamp}")
+
+        await ctx.send(embed=embed)
+
+
+
+        cursor = self.conn.cursor()
+
+
+        current_timestamp = datetime.utcnow()
+        self.last_buyers = [entry for entry in self.last_buyers if (current_timestamp - entry[1]).total_seconds() <= self.calculate_average_time_type("buy_etf")]
+        if self.check_last_action(self.last_buyers, user_id, current_timestamp):
+#            await ctx.send(f"You can't make another buy within {self.calculate_average_time_type("buy_etf")} seconds of your last action.")
+            return
+        # Add the current action to the list
+        self.last_buyers.append((user_id, current_timestamp))
+
+
+        # Check if user already holds the maximum allowed quantity of the ETF
+        cursor.execute("SELECT COALESCE(SUM(quantity), 0) FROM user_etfs WHERE user_id=? AND etf_id=?", (user_id, etf_id))
+        current_holding = cursor.fetchone()[0]
+
+        if etf_shares == 0:
+            await ctx.send(f"No Shares available for ETF {etf_id}")
+            return
+
+        if int(current_holding) + int(quantity) >= int(etf_shares):
+            await ctx.send(f"Not enough shares left\n\nAvailable: {etf_shares:,.0f}")
+            return
+
+        # Fetch the ETF's value and calculate the total cost
+        etf_value = await get_etf_value(self, ctx, etf_id)
+
+        total_cost = Decimal(etf_value) * Decimal(quantity)
+
+
+        # Calculate the tax amount based on dynamic factors
+        tax_percentage = self.calculate_tax_percentage(ctx, "buy_etf")
+        fee = total_cost * Decimal(tax_percentage)
+        total_cost_with_tax = total_cost + fee
+
+        # Check if user has enough balance to buy the ETF
+        current_balance = get_user_balance(self.conn, user_id)
+
+        if total_cost_with_tax > current_balance:
+            # Calculate the missing amount needed to complete the transaction including tax.
+            missing_amount = total_cost - current_balance
+            await ctx.send(f"{ctx.author.mention}, you do not have enough $QSE to buy this ETP. You need {missing_amount:,.2f} more $QSE, including Gas, to complete this purchase.")
+            return
+
+        new_balance = current_balance - total_cost_with_tax
+
+        try:
+            P3addrConn = sqlite3.connect("P3addr.db")
+            PBotAddr = get_p3_address(P3addrConn, PBot)
+            await self.give_addr(ctx, PBotAddr, int(total_cost_with_tax), False)
+            user_id = ctx.author.id
+#            add_city_tax(user_id, fee)
+#            update_user_balance(self.conn, user_id, new_balance)
+        except ValueError as e:
+            await ctx.send(f"An error occurred while updating the user balance. Error: {str(e)}")
+            return
+        new_shares = etf_shares - quantity
+        await update_etf_shares(self, etf_id, new_shares)
+        # Update user's ETF holdings
+        try:
+            cursor.execute("""
+                INSERT INTO user_etfs (user_id, etf_id, quantity)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, etf_id) DO UPDATE SET quantity = quantity + ?
+            """, (user_id, etf_id, quantity, quantity))
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while updating user ETF holdings. Error: {str(e)}")
+            return
+
+        await log_transfer(self, ledger_conn, ctx, "P3 Bot", self.bot_address, get_user_id(self.P3addrConn, self.bot_address), fee)
+        await log_transaction(ledger_conn, ctx, "Buy ETP", str(etf_id), quantity, total_cost_with_tax, (total_cost_with_tax + fee), current_balance, new_balance, etf_value, "True")
+
+        self.conn.commit()
+
+        elapsed_time = timeit.default_timer() - self.buy_etf_timer_start
+        self.buy_etf_avg.append(elapsed_time)
+        avg_time = sum(self.buy_etf_avg) / len(self.buy_etf_avg)
+#        await self.update_etf_prices(ctx, etf_id, (((int(amount) - int(etf_value)) / int(etf_value)) * 100) * 0.1)
+#        print(f"Updated Stocks in ETF {etf_id} by {((((int(quantity) - int(etf_value)) / int(etf_value)) * 100) * 0.1):,.5f}%")
+        user_id = ctx.author.id
+        P3addrConn = sqlite3.connect("P3addr.db")
+        P3addr = get_p3_address(P3addrConn, user_id)
+        current_timestamp = datetime.utcnow()
+        color = discord.Color.green()
+        embed = discord.Embed(title=f"ETP Transaction Completed", color=color)
+        embed.add_field(name="Address:", value=f"{P3addr}", inline=False)
+        embed.add_field(name="ETP:", value=f"{etf_id}", inline=False)
+        embed.add_field(name="Amount:", value=f"{quantity:,.2f}", inline=False)
+        embed.add_field(name="Total Cost w/Gas:", value=f"{(total_cost_with_tax + fee):,.2f} $QSE", inline=False)
+        embed.add_field(name="Old Balance:", value=f"{current_balance:,.2f} $QSE", inline=False)
+        embed.add_field(name="New Balance:", value=f"{new_balance:,.2f} $QSE", inline=False)
+        tax_rate = tax_percentage * 100
+        embed.add_field(name="Gas Rate:", value=f"{tax_rate:.2f}%", inline=False)
+        embed.add_field(name="Transaction Time:", value=f"{elapsed_time:.2f} seconds", inline=False)
+        embed.set_footer(text=f"Timestamp: {current_timestamp}")
+        await add_experience(self, self.conn, ctx.author.id, 3, ctx)
+        await ctx.send(embed=embed)
+        print(f"""
+                **ETP_DEBUG**
+                -------------------------------------
+                Index ID: {etf_id}
+                Action: Buy
+                User: {generate_crypto_address(user_id)}
+                Amount: {quantity:,}
+                Price: {etf_value:,.2f} $QSE
+                Gas Paid: {(fee * 2):,.2f} $QSE
+                Transaction Time: {elapsed_time:.2f}
+                Average Transaction Time: {avg_time:.2f}
+                Gas Fee: {(self.calculate_tax_percentage(ctx, "buy_etf") * 100):.2f}%
+                Timestamp: {current_timestamp}
+                -------------------------------------
+            """)
+
+
+
+
+
+    @commands.command(name="sell_etf", help="Sell an ETF. Provide the ETF ID and quantity.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def sell_etf(self, ctx, etf_id: int, quantity: int):
+        await ctx.message.delete()
+        current_timestamp = datetime.utcnow()
+        user_id = ctx.author.id
+        P3addrConn = sqlite3.connect("P3addr.db")
+        P3addr = get_p3_address(P3addrConn, user_id)
+        # Fetch the ETF's value and calculate the total cost
+        etf_value = await get_etf_value(self, ctx, etf_id)
+
+        color = discord.Color.red()
+        embed = discord.Embed(title=f"ETP Transaction Processing", color=color)
+        embed.add_field(name="Address:", value=f"{P3addr}", inline=False)
+        embed.add_field(name="ETP:", value=f"{etf_id}", inline=False)
+        embed.add_field(name="Amount:", value=f"{quantity:,.2f}", inline=False)
+        embed.add_field(name="Value:", value=f"{etf_value:,.2f} $QSE", inline=False)
+        embed.set_footer(text=f"Timestamp: {current_timestamp}")
+
+        await ctx.send(embed=embed)
+        member = ctx.guild.get_member(user_id)
+        cursor = self.conn.cursor()
+
+
+        current_timestamp = datetime.utcnow()
+        self.last_sellers = [entry for entry in self.last_sellers if (current_timestamp - entry[1]).total_seconds() <= self.calculate_average_time_type("sell_etf")]
+        if self.check_last_action(self.last_sellers, user_id, current_timestamp):
+#            await ctx.send(f"You can't make another sell within {self.calculate_average_time_type("sell_etf")} seconds of your last action.")
+            return
+            # Add the current action to the list
+        self.last_sellers.append((user_id, current_timestamp))
+
+        # Check if user holds the specified quantity of the ETF
+        cursor.execute("SELECT quantity FROM user_etfs WHERE user_id=? AND etf_id=?", (user_id, etf_id))
+        current_holding = cursor.fetchone()
+
+        if current_holding is None or current_holding[0] < quantity:
+            await ctx.send("Insufficient ETP holdings.")
+            return
+
+        # Fetch the ETF's value and calculate the total cost
+        etf_value = await get_etf_value(self, ctx, etf_id)
+
+        total_sale_amount = Decimal(etf_value) * Decimal(quantity)
+
+        # Calculate the tax amount based on dynamic factors
+        tax_percentage = self.calculate_tax_percentage(ctx, "sell_etf")  # Custom function to determine the tax percentage based on quantity and total_sale_amount
+
+        fee = total_sale_amount * Decimal(tax_percentage)
+        total_sale_amount_with_tax = total_sale_amount - fee
+
+        # Update user's balance
+        current_balance = get_user_balance(self.conn, user_id)
+        new_balance = current_balance + total_sale_amount_with_tax
+
+        try:
+            await self.send_from_reserve(ctx, user_id, int(total_sale_amount_with_tax))
+            user_id = ctx.author.id
+        except ValueError as e:
+            await ctx.send(f"An error occurred while updating the user balance. Error: {str(e)}")
+            return
+
+        etf_shares = await get_available_etf_shares(self, etf_id)
+        new_shares = etf_shares + quantity
+        await update_etf_shares(self, etf_id, new_shares)
+
+        # Update user's ETF holdings
+        try:
+            cursor.execute("""
+                UPDATE user_etfs
+                SET quantity = quantity - ?
+                WHERE user_id = ? AND etf_id = ?
+            """, (quantity, user_id, etf_id))
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while updating user ETP holdings. Error: {str(e)}")
+            return
+        # Transfer the tax amount to the bot's address P3:03da907038
+        await log_transfer(self, ledger_conn, ctx, "P3 Bot", self.bot_address, get_user_id(self.P3addrConn, self.bot_address), fee)
+
+        await log_transaction(ledger_conn, ctx, "Sell ETP", str(etf_id), quantity, total_sale_amount, total_sale_amount_with_tax, current_balance, new_balance, etf_value, "True")
+
+        self.conn.commit()
+        if etf_id == 10:
+            await self.whaleBooster(ctx)
+        elapsed_time = timeit.default_timer() - self.sell_etf_timer_start
+        self.sell_etf_avg.append(elapsed_time)
+        avg_time = sum(self.sell_etf_avg) / len(self.sell_etf_avg)
+        user_id = ctx.author.id
+        P3addrConn = sqlite3.connect("P3addr.db")
+        P3addr = get_p3_address(P3addrConn, user_id)
+        current_timestamp = datetime.utcnow()
+        color = discord.Color.red()
+        embed = discord.Embed(title=f"ETP Transaction Completed", color=color)
+        embed.add_field(name="Address:", value=f"{P3addr}", inline=False)
+        embed.add_field(name="ETP:", value=f"{etf_id}", inline=False)
+        embed.add_field(name="Amount:", value=f"{quantity:,.2f}", inline=False)
+        embed.add_field(name="Total Sale w/Gas:", value=f"{total_sale_amount_with_tax:,.2f} $QSE", inline=False)
+        embed.add_field(name="Old Balance:", value=f"{current_balance:,.2f} $QSE", inline=False)
+        embed.add_field(name="New Balance:", value=f"{new_balance:,.2f} $QSE", inline=False)
+        tax_rate = tax_percentage * 100
+        embed.add_field(name="Gas Rate:", value=f"{tax_rate:.2f}%", inline=False)
+        embed.add_field(name="Transaction Time:", value=f"{elapsed_time:.2f} seconds", inline=False)
+        embed.set_footer(text=f"Timestamp: {current_timestamp}")
+        await add_experience(self, self.conn, ctx.author.id, 3, ctx)
+
+
+        await ctx.send(embed=embed)
+        print(f"""
+                    **ETP_DEBUG**
+                --------------------
+                Index ID: {etf_id}
+                Action: Sell
+                User: {generate_crypto_address(user_id)}
+                Amount: {quantity:,}
+                Price: {etf_value:,.2f} $QSE
+                Gas Paid: {fee:,.2f} $QSE
+                Transaction Time: {elapsed_time:.2f}
+                Average Transaction Time: {avg_time:.2f}
+                Gas Fee: {(self.calculate_tax_percentage(ctx, "sell_etf") * 100):.2f}%
+                Timestamp: {current_timestamp}
+                --------------------
+            """)
+

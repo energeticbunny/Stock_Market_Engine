@@ -1,0 +1,42 @@
+async def calculate_daily_staking_reward(self, user_id):
+    try:
+        conn = sqlite3.connect("currency_system.db")
+        cursor = conn.cursor()
+
+        # Calculate total rewards
+        base_rewards = {
+            "penthouse-legendary": 750_000_000_000,  # 100 billion $QSE per week
+            "penthouse-og": 50_000_000_000,
+            "poly-the-parrot": 25_000_000_000,   # 30 billion $QSE per week
+            "realtor-license": 100_000_000_000,
+            "urban-penthouse": 45_000_000_000,
+            "stake-booster": 0.10,  # 10% bonus to overall staking rewards
+            "qse-genesis": 0.75
+        }
+
+        cursor.execute("SELECT nft, COUNT(*) FROM user_stakes WHERE user_id=? GROUP BY nft", (user_id,))
+        user_stake_counts = cursor.fetchall()
+
+        user_rewards = 0
+
+        for nft, count in user_stake_counts:
+            if nft in base_rewards and nft != "stake-booster":
+                base_reward = base_rewards[nft] * count
+                user_rewards += base_reward
+
+        # Check for stake-boosters and apply the bonus
+        stake_booster_count = next((count for nft, count in user_stake_counts if nft == "stake-booster"), 0)
+        bonus_multiplier = base_rewards.get("stake-booster", 1.0)
+        bonus_rewards = user_rewards * bonus_multiplier * stake_booster_count
+        user_rewards += bonus_rewards
+
+        # Check for QSE Genesis and apply the 75% boost
+        qse_genesis_count = next((count for nft, count in user_stake_counts if nft == "qse-genesis"), 0)
+        qse_genesis_boost = base_rewards.get("qse-genesis", 0.0)
+        user_rewards += user_rewards * qse_genesis_boost * qse_genesis_count
+
+        return user_rewards
+
+ except sqlite3.Error as e:
+        print(f"An error occurred: {e}")
+        return 0

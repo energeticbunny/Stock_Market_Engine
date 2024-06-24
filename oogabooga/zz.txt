@@ -1,0 +1,219 @@
+
+# Set the locale to a valid one (e.g., 'en_US.UTF-8')
+locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+
+# Create a formatter function to format prices
+def price_formatter(x, pos):
+    if x < 0.01:
+        # Format small prices differently
+        return f"{x:.8f}"
+    else:
+        return locale.currency(x, grouping=True)
+
+
+def buy_check(cursor, user_id, stock_name, time_threshold):
+    # Convert shorthand time to timedelta
+    time_threshold = parse_time_shorthand(time_threshold)
+
+    # Get the total amount bought within the specified time threshold by the user for this stock
+    cursor.execute("""
+        SELECT SUM(amount), MAX(timestamp)
+        FROM user_daily_buys
+        WHERE user_id=? AND symbol=? AND timestamp >= ?
+    """, (user_id, stock_name, datetime.now() - time_threshold))
+
+    hourly_bought_record = cursor.fetchone()
+    hourly_bought = hourly_bought_record[0] if hourly_bought_record and hourly_bought_record[0] is not None else 0
+    last_purchase_time_str = hourly_bought_record[1] if hourly_bought_record and hourly_bought_record[1] is not None else None
+
+    # Convert last_purchase_time to a datetime object
+    last_purchase_time = datetime.strptime(last_purchase_time_str, "%Y-%m-%d %H:%M:%S") if last_purchase_time_str else None
+
+    remaining_time = calculate_remaining_time(last_purchase_time, time_threshold)
+
+    return hourly_bought > 0, last_purchase_time, remaining_time
+
+def sell_check(cursor, user_id, stock_name, time_threshold):
+    # Convert shorthand time to timedelta
+    time_threshold = parse_time_shorthand(time_threshold)
+
+    # Get the total amount sold within the specified time threshold by the user for this stock
+    cursor.execute("""
+        SELECT SUM(amount), MAX(timestamp)
+        FROM user_daily_sells
+        WHERE user_id=? AND symbol=? AND timestamp >= ?
+    """, (user_id, stock_name, datetime.now() - time_threshold))
+
+    daily_sold_record = cursor.fetchone()
+    daily_sold = daily_sold_record[0] if daily_sold_record and daily_sold_record[0] is not None else 0
+    last_sold_time_str = daily_sold_record[1] if daily_sold_record and daily_sold_record[1] is not None else None
+
+    # Convert last_sold_time to a datetime object
+    last_sold_time = datetime.strptime(last_sold_time_str, "%Y-%m-%d %H:%M:%S") if last_sold_time_str else None
+
+    remaining_time = calculate_remaining_time(last_sold_time, time_threshold)
+
+    return daily_sold > 0, last_sold_time, remaining_time
+
+
+
+
+def is_valid_user_id(client, user_id):
+    user = client.get_user(user_id)
+    return user is not None
+
+#client = discord.Client()
+
+##
+# Function to split a list into chunks of a specific size
+def chunk_list(lst, chunk_size):
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
+
+
+def chunks(data, size):
+    it = iter(data)
+    for i in range(0, len(data), size):
+        yield {k: data[k] for k in list(data)[i:i + size]}
+
+# Define a function to create a page of stocks that can be bought
+def create_stock_page(stocks):
+    embed = discord.Embed(title="Stocks Available for Purchase", color=discord.Color.blue())
+    for stock, amount in stocks.items():
+        embed.add_field(name=stock, value=f"Remaining Shares: {amount}", inline=False)
+    return embed
+
+def create_multipage_embeds(data, title):
+    # Split data into chunks to create multipage embeds
+    chunk_size = 10  # Adjust the chunk size as needed
+    chunks = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
+
+    # Create multipage embeds
+    pages = []
+    for chunk in chunks:
+        embed = discord.Embed(title=title, color=discord.Color.blue())
+        for action, symbol, total_quantity, total_pre_tax_amount in chunk:
+            embed.add_field(
+                name=f"{action.capitalize()} {symbol}",
+                value=f"Total Quantity: {total_quantity}\nTotal Pre-Gas Amount: {total_pre_tax_amount:,.0f} $QSE",
+                inline=True
+            )
+        pages.append(embed)
+
+    return pages
+
+
+
+
+async def tax_command(self, ctx):
+    user_id = ctx.author.id
+    bot_id = PBot
+    base_amount = 1000
+    tax_percentage = self.calculate_tax_percentage(ctx, "buy_stock")
+    tax_amount = round(base_amount * tax_percentage)
+    total_amount = base_amount + tax_amount
+
+    user_balance = get_user_balance(self.conn, user_id)
+    bot_balance = get_user_balance(self.conn, bot_id)
+
+    if user_balance < total_amount:
+        await ctx.send(f"{ctx.author.mention}, you don't have enough $QSE to run this command. Your current balance is {user_balance:,.2f} $QSE. Requires {base_amount} + {tax_amount}")
+        return
+
+    # Deduct the tax from the sender's balance
+    await update_user_balance(self.conn, user_id, user_balance - total_amount)
+    await update_user_balance(self.conn, bot_id, bot_balance + total_amount)
+    ledger_conn = sqlite3.connect("p3ledger.db")
+    await log_transfer(self, ledger_conn, ctx, "P3 Bot", self.bot_address, get_user_id(self.P3addrConn, self.bot_address), total_amount)
+    print(f"Address: {get_p3_address(self.P3addrConn, ctx.author.id)} taxed {total_amount:,.2f} for using a taxable command")
+
+
+async def check_and_notify_address(ctx):
+    # Connect to the P3addr.db database
+    conn = sqlite3.connect("P3addr.db")
+
+    # Get the user's ID
+    user_id = str(ctx.author.id)
+
+    # Check if the user has already stored an address
+    if has_stored_address(conn, user_id):
+        await ctx.send("You have already stored a P3 address.")
+        conn.close()
+        return
+
+    # Notify the user to store an address
+    await ctx.send("You have not stored a P3 address. Please use `!store_addr` to store your P3 address.")
+
+    # Close the database connection
+    conn.close()
+
+async def get_stock_price(self, ctx, stock_name):
+    cursor_currency = self.conn.cursor()
+    cursor_currency.execute("SELECT price FROM stocks WHERE symbol = ?", (stock_name,))
+    result = cursor_currency.fetchone()
+    initial_price = result[0] if result else 0
+
+    weighted_metrics = await get_weighted_metrics(self, stock_name)
+    weighted_average_price, total_volume = weighted_metrics if weighted_metrics else (0, 1)
+
+    result_op = await lowest_price_order(self, ctx, "sell", stock_name)
+    if result_op:
+        order_price = result_op["price"]
+    else:
+        order_price = 0
+    result = await get_supply_stats(self, ctx, stock_name)
+    reserve, total, locked, escrow, market, circulating = result if result else (0, 1, 0, 0, 0, 0)
+
+    iMC = (total * initial_price)
+    avbl = market + locked
+    avbl = avbl if avbl != 0 else 1
+
+    stockprice = (iMC / avbl)
+
+    if result_op:
+        if market < 1:
+            stockprice = result_op['price']
+            return stockprice
+        if weighted_average_price > 0:
+            stockprice = (stockprice + weighted_average_price) / 2
+        else:
+            stockprice = (stockprice + result_op['price']) / 2
+
+    if stock_name.lower() == "p3:stable":
+        stockprice = 1000
+    return stockprice
+
+
+
+async def reset_daily_stock_limits(ctx, user_id):
+    # Connect to the currency_system database
+    currency_conn = sqlite3.connect("currency_system.db")
+    cursor = currency_conn.cursor()
+
+    try:
+        # Check if the user has a daily stock buy record for any stock
+        cursor.execute("""
+            SELECT DISTINCT symbol
+            FROM user_daily_buys
+            WHERE user_id=? AND timestamp >= date('now', '-1 day')
+        """, (user_id,))
+        stocks = cursor.fetchall()
+
+        if stocks:
+            # Reset the daily stock buy record for all stocks
+            cursor.execute("""
+                DELETE FROM user_daily_buys
+                WHERE user_id=? AND timestamp >= date('now', '-1 day')
+            """, (user_id,))
+            currency_conn.commit()
+            P3addrConn = sqlite3.connect("P3addr.db")
+
+            stock_symbols = ', '.join(stock[0] for stock in stocks)
+            await ctx.send(f"Successfully reset daily stock buy limits for the user with ID {get_p3_address(P3addrConn ,user_id)} and stocks: {stock_symbols}.")
+        else:
+            await ctx.send(f"This user did not reach the daily stock buy limit for any stocks yet.")
+    except sqlite3.Error as e:
+        await ctx.send(f"An error occurred: {str(e)}")
+    finally:
+        # Close the database connection
+        currency_conn.close()

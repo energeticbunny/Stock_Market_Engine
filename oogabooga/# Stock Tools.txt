@@ -1,0 +1,870 @@
+# Stock Tools
+
+    @commands.command(name="top_held_stocks", help="Show the top 10 owned stocks.")
+    async def top_stocks1(self, ctx):
+        try:
+            cursor = self.conn.cursor()
+
+            # Fetch the top 10 owned stocks
+            cursor.execute("""
+                SELECT symbol, SUM(amount) AS total_amount
+                FROM user_stocks
+                WHERE user_id != ?
+                GROUP BY symbol
+                ORDER BY total_amount DESC
+                LIMIT 10
+            """, (PBot,))
+            top_stocks = cursor.fetchall()
+
+            if not top_stocks:
+                await ctx.send("No stocks found.")
+                return
+
+            # Create an embed to display the top stocks
+            embed = discord.Embed(title="Top 10 Owned Stocks", color=discord.Color.blue())
+            for rank, stock in enumerate(top_stocks, start=1):
+                symbol = stock['symbol']
+                total_amount = stock['total_amount']
+                embed.add_field(name=f"{rank}. {symbol}", value=f"Total Amount:\n{total_amount:,.0f} shares", inline=False)
+
+            await ctx.send(embed=embed)
+            await self.top_user_stocks(ctx)
+
+        except sqlite3.Error as e:
+            embed = discord.Embed(description=f"An error occurred while fetching the top stocks: {e}")
+            await ctx.send(embed=embed)
+        except Exception as e:
+            embed = discord.Embed(description=f"An error occurred while fetching the top stocks: {e}")
+            await ctx.send(embed=embed)
+
+    @commands.command(name="top_user_stocks", help="Show the top users by volume of stock they hold and their top stocks.")
+    async def top_user_stocks(self, ctx):
+        try:
+            cursor = self.conn.cursor()
+
+            # Fetch the top users by volume of stock they hold
+            cursor.execute("""
+                SELECT user_id, SUM(amount) AS total_amount
+                FROM user_stocks
+                WHERE user_id != ?
+                GROUP BY user_id
+                ORDER BY total_amount DESC
+                LIMIT 10
+            """, (PBot,))
+            top_users = cursor.fetchall()
+
+            if not top_users:
+                await ctx.send("No users found.")
+                return
+
+            # Create an embed to display the top users and their top stocks
+            embed = discord.Embed(title="Top Users by Volume of Stock Held", color=discord.Color.blue())
+            for user_info in top_users:
+                user_id = user_info['user_id']
+                total_amount = user_info['total_amount']
+
+                # Fetch the top stocks held by the user
+                cursor.execute("""
+                    SELECT symbol, SUM(amount) AS total_amount
+                    FROM user_stocks
+                    WHERE user_id = ?
+                    GROUP BY symbol
+                    ORDER BY total_amount DESC
+                    LIMIT 3
+                """, (user_id,))
+                user_stocks = cursor.fetchall()
+
+                # Format stock information
+                stock_info = "\n".join([f"{stock['symbol']}: {stock['total_amount']:.0f} shares" for stock in user_stocks])
+
+                # Add user's information to the embed
+                embed.add_field(name=f"User {get_p3_address(self.P3addrConn, user_id)}", value=f"Total Stock Held: {total_amount:,.0f} shares\nTop Stocks:\n{stock_info}\n-----------------------------------------", inline=False)
+
+            await ctx.send(embed=embed)
+
+        except sqlite3.Error as e:
+            embed = discord.Embed(description=f"An error occurred while fetching the top user stocks: {e}")
+            await ctx.send(embed=embed)
+        except Exception as e:
+            embed = discord.Embed(description=f"An error occurred while fetching the top user stocks: {e}")
+            await ctx.send(embed=embed)
+
+
+    @commands.command(name='topstocks', help='Shows the top stocks based on specified criteria.')
+    async def topstocks(self, ctx, option: str = 'mixed'):
+        cursor = self.conn.cursor()
+
+        try:
+            if option.lower() == 'high':
+                # Get the top 10 highest price stocks with available quantities
+                cursor.execute("SELECT symbol, price, available FROM stocks WHERE available > 0 ORDER BY price DESC LIMIT 10")
+                top_stocks = cursor.fetchall()
+                title = 'Top 10 Highest Price Stocks'
+
+            elif option.lower() == 'low':
+                # Get the top 10 lowest price stocks with available quantities
+                cursor.execute("SELECT symbol, price, available FROM stocks WHERE available > 0 ORDER BY price ASC LIMIT 10")
+                top_stocks = cursor.fetchall()
+                title = 'Top 10 Lowest Price Stocks'
+
+            else:
+                # Get the top 5 highest price stocks and the top 5 lowest price stocks with available quantities
+                cursor.execute("SELECT symbol, price, available FROM stocks WHERE available > 0 ORDER BY price DESC LIMIT 5")
+                top_high_stocks = cursor.fetchall()
+                cursor.execute("SELECT symbol, price, available FROM stocks WHERE available > 0 ORDER BY price ASC LIMIT 5")
+                top_low_stocks = cursor.fetchall()
+                top_stocks = top_high_stocks + top_low_stocks
+                title = 'Top 5 Highest and Lowest Price Stocks'
+
+            # Create the embed
+            embed = discord.Embed(title=title, color=discord.Color.blue())
+
+            # Add fields for the top stocks
+            for i, (symbol, price, available) in enumerate(top_stocks, start=1):
+                result = await get_supply_stats(self, ctx, symbol)
+                reserve, total, locked, escrow, market, circulating = result
+                decimal_places = 8 if price < 0.01 else 2
+                price = await get_stock_price(self, ctx, symbol)
+                embed.add_field(
+                    name=f"#{i}: {symbol}",
+                    value=f"Price: {price:,.{decimal_places}f} $QSE\nAvailable: {market:,.0f}\nEscrow: {escrow:,.0f}",
+                    inline=False
+                )
+
+            await ctx.send(embed=embed)
+
+        except sqlite3.Error as e:
+            # Log error message for debugging
+            print(f"Database error: {e}")
+
+            # Inform the user that an error occurred
+            await ctx.send(f"An error occurred while retrieving stock data. Please try again later.")
+
+        except Exception as e:
+            # Log error message for debugging
+            print(f"An unexpected error occurred: {e}")
+
+            # Inform the user that an error occurred
+            await ctx.send(f"An unexpected error occurred. Please try again later.")
+
+
+    @commands.command(name="treasure_chest", help="Opens a treasure chest and gives you shares of a stock.")
+    @is_allowed_user(930513222820331590)
+    async def treasure_chest(self, ctx, stock_symbol: str):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT symbol, available FROM stocks WHERE symbol=?", (stock_symbol,))
+        stock = cursor.fetchone()
+
+        if stock is None:
+            await ctx.send(f"No stock with symbol {stock_symbol} found.")
+            return
+
+        current_price = await get_stock_price(self, ctx, stock_symbol)
+        embed = discord.Embed(
+            title="Treasure Chest",
+            description=(f"""React with 💰 to claim your potential reward of {treasureMin:,} to {treasureMax:,}
+            Stock: {stock_symbol}
+            Current Price: {current_price:,.2f}
+            """),
+            color=0xFFD700,
+        )
+        message = await ctx.send(embed=embed)
+
+        await message.add_reaction("💰")
+
+        def reaction_check(reaction, user):
+            return (
+                str(reaction.emoji) == "💰"
+                and user != self.bot.user
+                and not user.bot
+                and user.id not in self.claimed_users
+            )
+
+        try:
+            while True:
+                reaction, user = await self.bot.wait_for(
+                    "reaction_add", timeout=1800, check=reaction_check
+                )
+
+                reward_amount = random.randint(treasureMin, treasureMax)
+
+                reward_message = f"{user.mention}, you received {reward_amount} shares of {stock_symbol}! 🎉"
+                await ctx.send(reward_message)
+
+                cursor.execute(
+                    "SELECT amount FROM user_stocks WHERE user_id=? AND symbol=?",
+                    (user.id, stock_symbol),
+                )
+                user_stock = cursor.fetchone()
+
+                if user_stock is None:
+                    cursor.execute(
+                        "INSERT INTO user_stocks(user_id, symbol, amount) VALUES(?, ?, ?)",
+                        (user.id, stock_symbol, reward_amount),
+                    )
+                else:
+                    new_amount = user_stock["amount"] + reward_amount
+                    cursor.execute(
+                        "UPDATE user_stocks SET amount=? WHERE user_id=? AND symbol=?",
+                        (new_amount, user.id, stock_symbol),
+                    )
+
+                new_available = stock["available"] - reward_amount
+                cursor.execute(
+                    "UPDATE stocks SET available=? WHERE symbol=?", (new_available, stock_symbol)
+                )
+
+                await log_stock_transfer(self, ledger_conn, ctx, self.bot.user, user, stock_symbol, reward_amount)
+
+                self.conn.commit()
+
+                # Add the user to the set of claimed users
+                self.claimed_users.add(user.id)
+
+                #Boost P3:Treasure_Chest
+                await self.treasureBooster(ctx)
+
+        except asyncio.TimeoutError:
+            await ctx.send("The treasure chest has been closed. Try again later!")
+
+
+
+    @commands.command(name="my_addr", help="")
+    async def my_addr(self, ctx):
+        conn = sqlite3.connect("P3addr.db")
+        # Get the Discord User ID of the invoking user
+        discord_user_id = ctx.author.id
+
+        # Generate the crypto address
+        crypto_address = generate_crypto_address(discord_user_id)
+
+        # Get the vanity address (if available)
+        vanity_address = get_vanity_address(conn, discord_user_id)
+
+        # Create an embed to display the information
+        embed = discord.Embed(title="Your P3 Address", color=0x00ff00)
+        embed.add_field(name="Personal P3 Address", value=crypto_address, inline=False)
+
+        # Include vanity address if available
+        if vanity_address:
+            embed.add_field(name="Vanity Address", value=vanity_address, inline=False)
+
+        # Send the embed as a reply
+        await ctx.send(embed=embed)
+
+# Command to store a P3 address
+    @commands.command(name='store_addr')
+    async def store_addr(self, ctx, target=None):
+        # Connect to the P3addr.db database
+        conn = sqlite3.connect("P3addr.db")
+
+        # Get the user's ID
+        user_id = str(ctx.author.id)
+
+        # Check if the user has already stored an address
+        if has_stored_address(conn, user_id):
+            await ctx.send("You have already stored a P3 address.")
+            conn.close()
+            return
+
+        # If no target is provided, store the address for the invoking user
+        if not target:
+            p3_address = generate_crypto_address(user_id)
+        else:
+            # If a target is provided, try to find the mentioned user
+            try:
+                # Remove potential mention symbols
+                target = target.strip("<@!>")
+                # Fetch the mentioned user's ID
+                target_user_id = int(target)
+                # Generate a P3 address for the mentioned user
+                p3_address = generate_crypto_address(target_user_id)
+            except ValueError:
+                await ctx.send("Invalid target. Please mention a user or leave it blank to store your own P3 address.")
+                conn.close()
+                return
+
+        # Store the P3 address in the database
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO user_addresses (user_id, p3_address) VALUES (?, ?)", (user_id, p3_address))
+        conn.commit()
+
+        await ctx.send(f"P3 address stored successfully: {p3_address}")
+        create_user_rpg_stats(user_id)
+
+        # Close the database connection
+        conn.close()
+
+
+    @commands.command(name='store_user_addr', help='Store the P3 address of a mentioned user.')
+    async def store_user_addr(self, ctx, target: discord.Member):
+        # Connect to the P3addr.db database
+        conn = sqlite3.connect("P3addr.db")
+
+        # Get the user's ID
+        user_id = str(target.id)
+
+        # Check if the user has already stored an address
+        if has_stored_address(conn, user_id):
+            await ctx.send("You have already stored a P3 address.")
+            conn.close()
+            return
+
+        # Generate a P3 address for the mentioned user
+        p3_address = generate_crypto_address(target.id)
+
+        # Store the P3 address in the database
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO user_addresses (user_id, p3_address) VALUES (?, ?)", (user_id, p3_address))
+        conn.commit()
+
+        await ctx.send(f"P3 address for {target.mention} stored successfully: {p3_address}")
+
+        # Close the database connection
+        conn.close()
+
+
+    @commands.command(name='store_all_users', help='Store P3 addresses for all non-bot users in the server.')
+    async def store_all_users(self, ctx):
+        # Connect to the P3addr.db database
+        conn = sqlite3.connect("P3addr.db")
+
+        # Get all non-bot members in the server
+        non_bot_members = [member for member in ctx.guild.members if not member.bot]
+
+        # Iterate over non-bot members and store their P3 addresses
+        for member in non_bot_members:
+            user_id = str(member.id)
+
+            # Check if the user already has a stored address
+            if has_stored_address(conn, user_id):
+                await ctx.send(f"{member.mention} already has a P3 address stored.")
+                continue
+
+            # Generate a P3 address for the member
+            p3_address = generate_crypto_address(member.id)
+
+            # Store the P3 address in the database
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO user_addresses (user_id, p3_address) VALUES (?, ?)", (user_id, p3_address))
+            conn.commit()
+
+            await ctx.send(f"P3 address for {member.mention} stored successfully: {p3_address}")
+
+        # Close the database connection
+        conn.close()
+
+
+
+
+    @commands.command(name='assign_vanity_addr', help='Assign a vanity P3 address to a user.')
+    @is_allowed_user(930513222820331590)
+    async def assign_vanity_addr(self, ctx, target, vanity_address):
+        # Connect to the P3addr.db database
+        conn = sqlite3.connect("P3addr.db")
+
+        # Get the user's ID based on the input (mention, user ID, or P3 address)
+        user_id = get_user_id_from_input(conn, target)
+
+        if not user_id:
+            await ctx.send("Invalid user. Please provide a valid mention, user ID, or P3 address.")
+            conn.close()
+            return
+
+        # Check if the vanity address is unique
+        if not is_vanity_address_unique(conn, vanity_address):
+            await ctx.send("Vanity address is not unique. Please choose a different one.")
+            conn.close()
+            return
+
+        # Update the user's vanity address in the database
+        cursor = conn.cursor()
+        cursor.execute("UPDATE user_addresses SET vanity_address=? WHERE user_id=?", (vanity_address, user_id))
+        conn.commit()
+
+        await ctx.send(f"Vanity address for user {target} assigned successfully: {vanity_address}")
+
+        # Close the database connection
+        conn.close()
+
+# Command to look up user information
+    @commands.command(name='whois')
+    async def whois(self, ctx, target):
+        # Connect to the P3addr.db database
+        conn = sqlite3.connect("P3addr.db")
+
+        # Check if the target is a mention (Discord username)
+        if ctx.message.mentions:
+            user_id = str(ctx.message.mentions[0].id)
+            p3_address = get_p3_address(conn, user_id)
+            if p3_address:
+                await ctx.send(f"{ctx.message.mentions[0].mention}'s P3 address: {p3_address}")
+            else:
+                await ctx.send("User has not stored a P3 address.")
+
+        # Check if the target is a P3 address or vanity address
+        elif target.startswith("P3:"):
+            p3_address = target
+            user_id = get_user_id(conn, p3_address)
+            if user_id:
+                await ctx.send(f"The owner of {p3_address} is <@{user_id}>.")
+            else:
+                user_id = get_user_id_by_vanity(conn, target)
+                if user_id:
+                    p3_address = get_p3_address(conn, user_id)
+                    await ctx.send(f"The owner of vanity address {target} is <@{user_id}>. P3 address: {p3_address}")
+                else:
+                    await ctx.send("Invalid or unknown user, P3 address, or vanity address.")
+
+
+        else:
+            await ctx.send("Invalid or unknown user, P3 address, or vanity address.")
+
+        # Close the database connection
+        conn.close()
+
+    @commands.command(name="show_users", help="Show the number of users with stored P3 addresses.")
+    async def show_users(self, ctx):
+        P3conn = sqlite3.connect("P3addr.db")
+
+        cursor = P3conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM user_addresses")
+
+        count = cursor.fetchone()[0]
+
+        await ctx.send(f"There are {count} users with stored P3 addresses.")
+
+        P3conn.close()
+
+    @commands.command(name="top_sellers")
+    async def top_sellers(self, ctx):
+        # Connect to the ledger database
+        with sqlite3.connect("p3ledger.db") as ledger_conn:
+            ledger_cursor = ledger_conn.cursor()
+
+            current_date = datetime.now()
+
+            # Calculate the first day of the current month
+            first_day_of_current_month = current_date.replace(day=1)
+
+            # Calculate one month ago from the first day of the current month
+            one_month_ago = first_day_of_current_month - timedelta(days=1)
+
+            # Retrieve sell transactions for all stocks from the ledger within the last month
+            sell_transactions = ledger_cursor.execute("""
+                SELECT symbol, timestamp, price, user_id
+                FROM stock_transactions
+                WHERE action='Sell Stock' AND timestamp >= ?
+                ORDER BY timestamp
+            """, (one_month_ago,))
+
+            # Create a dictionary to store sellers and their total sell amounts
+            seller_totals = {}
+
+            for symbol, timestamp, price, seller_id in sell_transactions:
+                # Update or initialize the total sell amount for the seller
+
+                seller_totals[seller_id] = seller_totals.get(seller_id, Decimal(0)) + Decimal(str(price).replace(",", ""))
+
+            # Get the top 10 sellers by total sell amount across all stocks
+            top_sellers = sorted(seller_totals.items(), key=lambda x: x[1], reverse=True)[:10]
+
+            # Create an embed
+            embed = Embed(title="Top Sellers", color=0x00ff00)
+
+            # Add information to the embed
+            for seller_id, total_sell_amount in top_sellers:
+                p3addr = get_p3_address(self.P3addrConn, seller_id)
+                embed.add_field(name=f"Seller {p3addr}", value=f"Total Sell Amount - {total_sell_amount:,.0f}", inline=False)
+
+            # Send the embed to the channel
+            await ctx.send(embed=embed)
+
+
+    @commands.command(name="top_buyers")
+    async def top_buyers(self, ctx):
+        # Connect to the ledger database
+        with sqlite3.connect("p3ledger.db") as ledger_conn:
+            ledger_cursor = ledger_conn.cursor()
+
+            current_date = datetime.now()
+
+            # Calculate the first day of the current month
+            first_day_of_current_month = current_date.replace(day=1)
+
+            # Calculate one month ago from the first day of the current month
+            one_month_ago = first_day_of_current_month - timedelta(days=1)
+
+            # Retrieve sell transactions for all stocks from the ledger within the last month
+            sell_transactions = ledger_cursor.execute("""
+                SELECT symbol, timestamp, price, user_id
+                FROM stock_transactions
+                WHERE action='Buy Stock' AND timestamp >= ?
+                ORDER BY timestamp
+            """, (one_month_ago,))
+
+            # Create a dictionary to store sellers and their total sell amounts
+            seller_totals = {}
+
+            for symbol, timestamp, price, seller_id in sell_transactions:
+                # Update or initialize the total sell amount for the seller
+
+                seller_totals[seller_id] = seller_totals.get(seller_id, Decimal(0)) + Decimal(str(price).replace(",", ""))
+
+            # Get the top 10 sellers by total sell amount across all stocks
+            top_sellers = sorted(seller_totals.items(), key=lambda x: x[1], reverse=True)[:10]
+
+            # Create an embed
+            embed = Embed(title="Top Buyers", color=0x00ff00)
+
+            # Add information to the embed
+            for seller_id, total_sell_amount in top_sellers:
+                p3addr = get_p3_address(self.P3addrConn, seller_id)
+                embed.add_field(name=f"Buyer {p3addr}", value=f"Total Buy Amount - {total_sell_amount:,.0f}", inline=False)
+
+            # Send the embed to the channel
+            await ctx.send(embed=embed)
+
+##
+
+    @commands.command(name="get_total_transactions", help="Get the total of all transactions for the current month for a specified receiver_id.")
+    async def get_total_transactions(ctx, receiver_id: int):
+        # Connect to the p3ledger.db
+        conn = sqlite3.connect("p3ledger.db")
+        cursor = conn.cursor()
+
+        try:
+            # Calculate the start and end dates for the current month
+            now = datetime.now()
+            start_of_month = datetime(now.year, now.month, 1)
+            end_of_month = start_of_month + timedelta(days=31)
+
+            # Retrieve the total of all transactions for the current month and specified receiver_id
+            cursor.execute("""
+                SELECT COALESCE(SUM(amount), 0) AS total_amount
+                FROM transfer_transactions
+                WHERE receiver_id = ? AND timestamp >= ? AND timestamp < ?
+            """, (receiver_id, start_of_month, end_of_month))
+
+            total_amount = cursor.fetchone()[0]
+
+            await ctx.send(f"The total transactions for {ctx.message.author.mention} this month is: {total_amount:,.2f} $QSE.")
+
+        except Exception as e:
+            await ctx.send(f"An error occurred: {e}")
+
+        finally:
+            # Close the connection
+            conn.close()
+
+    @commands.command(name="give_stock", help="Give a user an amount of a stock. Deducts it from PBot's holdings.")
+    @is_allowed_user(930513222820331590)  # The user must have the 'admin' role to use this command.
+    async def give_stock(self, ctx, target, symbol: str, amount: int, verbose: bool = True):
+        try:
+            cursor = self.conn.cursor()
+
+            if target.startswith("P3:"):
+                p3_address = target
+                user_id = get_user_id(self.P3addrConn, p3_address)
+                if not user_id:
+                    await ctx.send("Invalid or unknown P3 address.")
+                    return
+            else:
+                await ctx.send("Please provide a valid P3 address.")
+                return
+
+            # Check if the stock exists.
+            cursor.execute("SELECT symbol, available FROM stocks WHERE symbol=?", (symbol,))
+            stock = cursor.fetchone()
+            if stock is None:
+                await ctx.send(f"No stock with symbol {symbol} found.")
+                return
+
+            # Deduct the stock from PBot's holdings.
+            pbot_stock = cursor.execute("SELECT amount FROM user_stocks WHERE user_id=? AND symbol=?", (PBot, symbol)).fetchone()
+            if pbot_stock and pbot_stock[0] >= amount:
+                new_pbot_amount = pbot_stock[0] - amount
+                cursor.execute("UPDATE user_stocks SET amount=? WHERE user_id=? AND symbol=?", (new_pbot_amount, PBot, symbol))
+
+                # Update the user's stocks.
+                cursor.execute("SELECT amount FROM user_stocks WHERE user_id=? AND symbol=?", (user_id, symbol))
+                user_stock = cursor.fetchone()
+                if user_stock is None:
+                    cursor.execute("INSERT INTO user_stocks(user_id, symbol, amount) VALUES(?, ?, ?)", (user_id, symbol, amount))
+                else:
+                    new_amount = user_stock[0] + amount
+                    cursor.execute("UPDATE user_stocks SET amount=? WHERE user_id=? AND symbol=?", (new_amount, user_id, symbol))
+
+                self.conn.commit()
+
+                if verbose:
+                    await ctx.send(f"Gave {amount:,} of {symbol} to {target}.")
+            else:
+                await ctx.send(f"Not enough {symbol} available in Market Holdings.")
+        except Exception as e:
+            print(f"An error occurred in give_stock: {e}")
+            await ctx.send("An error occurred while processing the command.")
+
+
+
+
+
+
+    @commands.command(name="distribute", help="Distribute a specified amount of a stock to all holders.")
+    @is_allowed_user(930513222820331590)
+    async def distribute_stock(self, ctx, symbol: str, amount: int):
+        cursor = self.conn.cursor()
+
+        # Check if the stock exists.
+        cursor.execute("SELECT symbol, available FROM stocks WHERE symbol=?", (symbol,))
+        stock = cursor.fetchone()
+        if stock is None:
+            await ctx.send(f"No stock with symbol {symbol} found.")
+            return
+
+        # Check if there's enough of the stock available.
+        if stock['available'] < amount:
+            await ctx.send(f"Not enough of {symbol} available.")
+            return
+
+        # Get all users holding the specified stock.
+        cursor.execute("SELECT user_id, amount FROM user_stocks WHERE symbol=?", (symbol,))
+        users_stocks = cursor.fetchall()
+
+        # Distribute the specified amount to each user.
+        for user_stock in users_stocks:
+            user_id, user_amount = user_stock['user_id'], user_stock['amount']
+            new_user_amount = user_amount + amount
+            cursor.execute("UPDATE user_stocks SET amount=? WHERE user_id=? AND symbol=?", (new_user_amount, user_id, symbol))
+
+        # Deduct the stock from the total supply.
+        new_available = stock['available'] - (amount * len(users_stocks))
+        cursor.execute("UPDATE stocks SET available=? WHERE symbol=?", (new_available, symbol))
+
+        self.conn.commit()
+
+        await ctx.send(f"Distributed {amount} of {symbol} to all holders.")
+
+
+    @commands.command(name="change_stock_price", help="Change the price of a specified stock.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def change_stock_price(self, ctx, stock_symbol: str, new_price: float):
+        cursor = self.conn.cursor()
+
+        try:
+            # Update the price of the stock
+            cursor.execute("UPDATE stocks SET price=? WHERE symbol=?", (new_price, stock_symbol))
+            self.conn.commit()
+
+#            await ctx.send(f"The price of stock with symbol {stock_symbol} has been updated to {new_price:.10f}.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while updating the stock price: {str(e)}")
+
+
+    @commands.command(name="merge_and_distribute", aliases=["merge"], help="Merge two stocks and distribute a specified amount of a third stock to all holders.")
+    @is_allowed_user(930513222820331590)
+    async def merge_and_distribute_stock(self, ctx, symbol1: str, symbol2: str, new_symbol: str, debug: bool = False):
+        cursor = self.conn.cursor()
+
+        # Check if the stocks exist.
+        cursor.execute("SELECT symbol, available FROM stocks WHERE symbol=?", (symbol1,))
+        stock1 = cursor.fetchone()
+        cursor.execute("SELECT symbol, available FROM stocks WHERE symbol=?", (symbol2,))
+        stock2 = cursor.fetchone()
+        if stock1 is None or stock2 is None:
+            await ctx.send(f"One or more stocks not found.")
+            return
+
+
+        # Get all users holding the specified stocks.
+        cursor.execute("SELECT user_id, amount FROM user_stocks WHERE symbol=? OR symbol=?", (symbol1, symbol2))
+        users_stocks = cursor.fetchall()
+
+        # Combine the amounts for each user.
+        combined_amounts = {}
+        for user_stock in users_stocks:
+            user_id, user_amount = user_stock['user_id'], user_stock['amount']
+            combined_amounts[user_id] = combined_amounts.get(user_id, 0) + user_amount
+
+            await self.remove_stock_from_user(ctx, user_id, symbol1)
+            await self.remove_stock_from_user(ctx, user_id, symbol2)
+
+        # Distribute the specified amount of the new stock to each user.
+        for user_id, user_amount in combined_amounts.items():
+
+            p3Addr = get_p3_address(self.P3addrConn, user_id)
+            if p3Addr and combined_amounts[user_id] != 0:
+
+                await ctx.send(f"User: {p3Addr} Amount: {combined_amounts[user_id]}")
+                await self.give_stock(ctx, p3Addr, new_symbol, combined_amounts[user_id], False)
+
+
+        await self.set_stock_supply(ctx, symbol1, 0, 0)
+        await self.set_stock_supply(ctx, symbol2, 0, 0)
+        symbol1_price = await get_stock_price(self, ctx, symbol1)
+        symbol2_price = await get_stock_price(self, ctx, symbol2)
+        new_stock_price = symbol1_price + symbol2_price
+        await self.change_stock_price(ctx, symbol1, 0)
+        await self.change_stock_price(ctx, symbol2, 0)
+        await self.change_stock_price(ctx, new_symbol, new_stock_price)
+        await ctx.send(f"Merged {symbol1} and {symbol2} into {new_symbol} and distributed to all holders.")
+
+
+    @commands.command(name="send_stock", help="Send a user an amount of a stock from your stash.")
+    @is_not_allowed_user(1224458697728593962, 1224461917448437892, 1224463766956015670, 1224465106835083348)
+    async def send_stock_command(self, ctx, target, symbol: str, amount: int):
+        sender_addr = get_p3_address(self.P3addrConn, ctx.author.id)
+        await send_stock(self, ctx, target, sender_addr, symbol, amount)
+
+
+
+    @commands.command(name="ceo_unlock")
+    async def ceo_unlock(self, ctx, symbol, percentage, ceo_type):
+        result = await get_supply_stats(self, ctx, symbol)
+        reserve, total, locked, escrow, market, circulating = result
+        amount = (int(percentage) / 100) * total
+
+        if ceo_type.lower() == "lock":
+            if int(market) < int(amount):
+                await ctx.send(f"Not enough shares of {symbol} to lock\n\nMarket: {market:,.0f}\nAmount: {amount:,.0f}")
+            else:
+                await unlock_share_limit(self, ctx, symbol, percentage, ceo_type)
+        elif ceo_type.lower() == "unlock":
+            if int(locked) < int(amount):
+                await ctx.send(f"Not enough shares of {symbol} to unlock\n\nLocked: {locked:,.0f}\nAmount: {amount:,.0f}")
+            else:
+                await unlock_share_limit(self, ctx, symbol, percentage, ceo_type)
+
+
+    @commands.command(name="unlock_shares")
+    @is_allowed_user(930513222820331590, PBot)
+    async def unlock_shares(self, ctx, symbol, amount, type):
+        total_supply, current_supply = await get_supply_info(self, ctx, symbol)
+
+        if type.lower() == "lock":
+            lock_unlock = "Locked"
+            await self.sell_stock_for_bot(ctx, symbol, amount)
+        elif type.lower() == "unlock":
+            lock_unlock = "Unlocked"
+            await self.buy_stock_for_bot(ctx, symbol, amount)
+
+
+    @commands.command(name="unlock_shares_per")
+    @is_allowed_user(930513222820331590, PBot)
+    async def unlock_shares_per(self, ctx,):
+        stocks = await get_etf_stocks(self, 6)
+        for stock in stocks:
+            result = await get_supply_stats(self, ctx, stock)
+            reserve, total, locked, escrow, market, circulating = result
+            amount = (locked * 0.9)
+            await ctx.send(f"Unlocking {amount:,.0f}/{total:,.0f} of {stock}")
+            await self.buy_stock_for_bot(ctx, stock, amount)
+        await ctx.send("Stock Unlock Completed")
+
+
+    @commands.command(name="unlock")
+    async def unlock_at_metric(self, ctx, symbol, metric):
+        result = await get_supply_stats(self, ctx, stock_name)
+        reserve, total, locked, escrow, market, circulating = result
+        total_supply = total
+        current_supply = market
+        total_shares_in_orders = escrow
+        escrow_percentage = (total_shares_in_orders / total_supply) * 100
+        if escrow_percentage <= float(metric):
+            print(f"{escrow_percentage} <= {metric}")
+        else:
+            print(f"Nope ... {escrow_percentage} >= {metric}")
+
+
+
+
+    @commands.command(name="add_stock", help="Add a new stock. Provide the stock symbol, name, price, total supply, and available amount.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def add_stock(self, ctx, symbol: str, name: str, price: int, total_supply: int, available: int):
+        cursor = self.conn.cursor()
+        cursor.execute("INSERT INTO stocks (symbol, name, price, total_supply, available) VALUES (?, ?, ?, ?, ?)",
+                       (symbol, name, price, total_supply, available))
+        self.conn.commit()
+        self.not_trading.append(symbol.lower())
+        self.ipo_stocks.append(symbol.lower())
+        await ctx.send(f"Added new stock: {symbol} ({name}), price: {price}, total supply: {total_supply}, available: {available}")
+
+
+
+    @commands.command(name='stock_info', aliases=['stock_metric'], help='Show the current price, available supply, and top holders of a stock.')
+    async def stock_info(self, ctx, symbol: str):
+        try:
+            result = await get_supply_stats(self, ctx, symbol)
+            reserve, total, locked, escrow, market, circulating = result
+
+
+
+
+            cursor = self.conn.cursor()
+
+
+
+
+
+            # Get the top holders of the stock
+            cursor.execute("""
+                SELECT user_id, amount
+                FROM user_stocks
+                WHERE symbol = ? and amount > 0.0
+                ORDER BY amount DESC
+                LIMIT 10
+            """, (symbol,))
+            top_holders = cursor.fetchall()
+
+            # Get the total number of holders altogether
+            cursor.execute("""
+                SELECT COUNT(DISTINCT user_id)
+                FROM user_stocks
+                WHERE symbol = ? and amount > 0.0
+            """, (symbol,))
+            total_holders = cursor.fetchone()[0]
+
+            # Create an embed to display the stock information
+            embed = discord.Embed(
+                title=f"Stock Information for {symbol}",
+                color=discord.Color.blue()
+            )
+            locked_percentage = (locked / total) * 100
+
+            escrow_percentage = (escrow / total) * 100
+            market_percentage = (market / total) * 100
+            circulating_percentage = (circulating / total) * 100
+            current_price = await get_stock_price(self, ctx, symbol)
+            circulating_value = current_price * circulating
+            escrow_value = current_price * escrow
+
+
+            embed.add_field(name="Market Supply", value=f"{market:,.0f} shares\n({market_percentage:,.2f}%)", inline=False)
+            embed.add_field(name="Escrow Supply", value=f"{escrow:,.0f} shares\n({escrow_percentage:,.2f}%)", inline=False)
+            embed.add_field(name="Locked Supply", value=f"{locked:,.0f} shares\n({locked_percentage:,.2f}%)", inline=False)
+            embed.add_field(name="Circulating Supply", value=f"{circulating:,.0f} shares\n({circulating_percentage:,.2f}%)", inline=False)
+            embed.add_field(name="Total Supply", value=f"{total:,.0f} shares\n\n------------------------------------------", inline=False)
+
+
+            if top_holders:
+                top_holders_str = "\n".join([
+                    f"{generate_crypto_address(user_id)} - {amount:,.0f}\n"
+                    f"({((amount / total) * 100):,.{len(str(int((amount / total) * 100))) if ((amount / total) * 100) > 0.1 else 8}f}%)\n"
+                    for user_id, amount in top_holders
+                    if user_id != PBot
+                ])
+
+
+                embed.add_field(name="Top Holders", value=top_holders_str, inline=False)
+            else:
+                embed.add_field(name="Top Holders", value="No one currently holds shares.", inline=False)
+
+            embed.add_field(name="Total Holders", value=f"{total_holders} holders", inline=False)
+            embed.add_field(name="Circulating Value", value=f"{circulating_value:,.2f} $QSE", inline=False)
+            embed.add_field(name="Escrow Value", value=f"{escrow_value:,.2f} $QSE", inline=False)
+
+            await ctx.send(embed=embed)
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while fetching stock information: {e}")

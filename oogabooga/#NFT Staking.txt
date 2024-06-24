@@ -1,0 +1,331 @@
+#NFT Staking
+
+
+    @commands.command(name="connect_wallet", aliases=["connect"])
+    async def connect_wallet(self, ctx, wallet_address: str):
+        try:
+            user_id = ctx.author.id
+
+            # Assuming you have a connection to the database
+            conn = sqlite3.connect("currency_system.db")
+            addrDB = sqlite3.connect("P3addr.db")
+            cursor = conn.cursor()
+
+            p3_address = get_p3_address(addrDB, user_id)
+
+            # Check if the user already exists in the table
+            cursor.execute("SELECT * FROM user_wallets WHERE user_id=?", (user_id,))
+            existing_user = cursor.fetchone()
+
+            if existing_user:
+                # Update existing user's wallet and P3 address
+                cursor.execute("UPDATE user_wallets SET wallet_address=?, p3_address=? WHERE user_id=?", (wallet_address, p3_address, user_id))
+                conn.commit()
+                await ctx.send("Wallet successfully updated.")
+            else:
+                # Insert new user
+                cursor.execute("INSERT INTO user_wallets (user_id, wallet_address, p3_address) VALUES (?, ?, ?)", (user_id, wallet_address, p3_address))
+                conn.commit()
+                await ctx.send("Wallet successfully connected.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred: {e}")
+
+        finally:
+            # Close the connection
+            addrDB.close()
+            conn.close()
+
+
+
+    @commands.command(name="check_wallet")
+    async def check_wallet(self, ctx):
+        user_id = ctx.author.id
+
+        # Assuming you have a connection to the database
+        conn = sqlite3.connect("currency_system.db")
+        cursor = conn.cursor()
+
+        # Check if the user exists in the table
+        cursor.execute("SELECT wallet_address FROM user_wallets WHERE user_id=?", (user_id,))
+        wallet_address = cursor.fetchone()
+
+        if wallet_address:
+            await ctx.send(f"Your stored wallet address is: {wallet_address[0]}")
+        else:
+            await ctx.send("You haven't connected a wallet yet. Use `!connect_wallet <wallet_address>` to connect your wallet.")
+
+        # Close the connection
+        conn.close()
+
+
+    @commands.command(name="stake")
+    @is_allowed_server(1161678765894664323, 1087147399371292732)
+    async def stake(self, ctx, nft: str, tokenid: str):
+        try:
+            user_id = ctx.author.id
+            if ctx.author.id in self.blacklisted:
+                await ctx.send("Your address has been blacklisted")
+                return
+
+            # Assuming you have a connection to the database
+            conn = sqlite3.connect("currency_system.db")
+            cursor = conn.cursor()
+
+            accepted_nft_names = ["penthouse-og", "penthouse-legendary", "stake-booster", "poly-the-parrot", "qse-genesis", "realtor-license", "urban-penthouse"]
+
+            if nft.lower() not in accepted_nft_names:
+                await ctx.send(f"We currently only accept {', '.join(accepted_nft_names[:-1])}, and {accepted_nft_names[-1]} Penthouse Staking during the test phase.\nType: !stake {'/'.join(accepted_nft_names)} <tokenid>\n\nTo find your tokenid, check your NFT on OpenSea.")
+                return
+
+
+            # Check if the user exists in the user_wallets table
+            cursor.execute("SELECT wallet_address FROM user_wallets WHERE user_id=?", (user_id,))
+            wallet_address = cursor.fetchone()
+
+            if not wallet_address:
+                await ctx.send("You haven't connected a wallet yet. Use `!connect_wallet <wallet_address>` to connect your wallet.")
+                return
+
+            # Separate connection variable for the finally block
+            finally_conn = sqlite3.connect("currency_system.db")
+            finally_cursor = finally_conn.cursor()
+
+            try:
+                # Check if the user has already staked with this NFT and tokenid
+                finally_cursor.execute("SELECT * FROM user_stakes WHERE user_id=? AND nft=? AND tokenid=?", (user_id, nft, tokenid))
+                existing_stake = finally_cursor.fetchone()
+
+                if existing_stake:
+                    await ctx.send("You have already staked with this NFT and tokenid.")
+                else:
+                    # Insert new stake with timestamp
+                    current_timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                    finally_cursor.execute("INSERT INTO user_stakes (user_id, nft, tokenid, stake_timestamp) VALUES (?, ?, ?, ?)", (user_id, nft, tokenid, current_timestamp))
+                    finally_conn.commit()
+                    await ctx.send("Stake successful...We will validate and verify your stake shortly.")
+
+            except sqlite3.Error as e:
+                await ctx.send(f"An error occurred: {e}")
+
+            finally:
+                # Close the connection in the finally block
+                finally_conn.close()
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred: {e}")
+
+        finally:
+            # Close the connection in the outer finally block
+            conn.close()
+
+
+    @commands.command(name="stake_stats")
+    async def stake_stats(self, ctx):
+        try:
+            user_id = ctx.author.id
+
+            # Assuming you have a connection to the database
+            conn = sqlite3.connect("currency_system.db")
+            cursor = conn.cursor()
+
+            # Get the count of each item staked by the user
+            cursor.execute("SELECT nft, COUNT(*) FROM user_stakes WHERE user_id=? GROUP BY nft", (user_id,))
+            stake_counts = cursor.fetchall()
+
+            if not stake_counts:
+                await ctx.send("You haven't staked any items yet.")
+                return
+
+            # Format and send the result
+            result_str = "Stake Stats:\n"
+            for nft, count in stake_counts:
+                result_str += f"{nft}: {count} items\n"
+
+            await ctx.send(result_str)
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred: {e}")
+
+        finally:
+            # Close the connection
+            conn.close()
+
+
+    @commands.command(name="daily_resource")
+    @is_allowed_user(930513222820331590, PBot)
+    async def daily_resource(self, ctx):
+        try:
+            user_id = ctx.author.id
+
+            # Assuming you have a connection to the database
+            cursor = self.conn.cursor()
+
+            # Get the count of each item staked by the user
+            cursor.execute("SELECT nft, COUNT(*) FROM user_stakes WHERE user_id=? GROUP BY nft", (user_id,))
+            stake_counts = cursor.fetchall()
+            base_rewards = {
+                "penthouse-legendary": 750,  # 100 billion $QSE per week
+                "penthouse-og": 50,
+                "urban-penthouse": 45
+
+            }
+            total_rewards = 0
+            for nft, count in stake_counts:
+                base_reward = base_rewards.get(nft, 0) * count
+                total_rewards += base_reward
+
+
+            if total_rewards:
+                await self.send_item_reserve(ctx, get_p3_address(self.P3addrConn, ctx.author.id), "Gold", total_rewards)
+                return total_rewards
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred: {e}")
+
+
+    @commands.command(name="stake_rewards")
+    async def stake_rewards(self, ctx):
+        try:
+            user_id = ctx.author.id
+
+            # Assuming you have a connection to the database
+            cursor = self.conn.cursor()
+
+            # Get the count of each item staked by the user
+            cursor.execute("SELECT nft, COUNT(*) FROM user_stakes WHERE user_id=? GROUP BY nft", (user_id,))
+            stake_counts = cursor.fetchall()
+
+            if not stake_counts:
+                await ctx.send("You haven't staked any items yet.")
+                return
+
+            # Calculate rewards based on staked items
+            base_rewards = {
+                "penthouse-legendary": 750_000_000_000,  # 100 billion $QSE per week
+                "penthouse-og": 50_000_000_000,
+                "poly-the-parrot": 25_000_000_000,   # 30 billion $QSE per week
+                "realtor-license": 100_000_000_000,
+                "urban-penthouse": 45_000_000_000,
+                "stake-booster": 0.10,  # 10% bonus to overall staking rewards
+                "qse-genesis": 0.75
+            }
+
+            total_rewards = 0
+
+            # Calculate rewards and build result string
+            result_str = "Stake Rewards:\n"
+            for nft, count in stake_counts:
+                if nft in base_rewards and nft != "stake-booster" and nft != "qse-genesis":
+                    base_reward = base_rewards[nft] * count
+                    result_str += f"{nft}: {count} items, Weekly Rewards: {base_reward:,.2f} $QSE\n"
+                    total_rewards += base_reward
+
+            # Check for stake-boosters and apply the bonus
+            stake_booster_count = next((count for nft, count in stake_counts if nft == "stake-booster"), 0)
+            bonus_multiplier = base_rewards.get("stake-booster", 1.0)
+            bonus_rewards = total_rewards * bonus_multiplier * stake_booster_count
+            total_rewards += bonus_rewards
+
+            # Check for QSE Genesis and apply the 75% boost
+            qse_genesis_count = next((count for nft, count in stake_counts if nft == "qse-genesis"), 0)
+            qse_genesis_boost = base_rewards.get("qse-genesis", 0.0)
+            total_rewards += total_rewards * qse_genesis_boost * qse_genesis_count
+
+            result_str += f"\nStake Booster Bonus: {bonus_rewards:,.2f} $QSE\n"
+            result_str += f"Total Weekly Rewards: {total_rewards:,.2f} $QSE"
+
+            # Send the result in an embed
+            color = discord.Color.green()
+            embed = Embed(title="Stake Rewards", description=result_str, color=color)
+            await ctx.send(embed=embed)
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred: {e}")
+
+
+
+    @commands.command(name="distribute_stake_rewards")
+    @is_allowed_user(930513222820331590, PBot)
+    async def distribute_stake_rewards(self, ctx):
+        try:
+            user_id = PBot
+
+            # Assuming you have a connection to the database
+            conn = sqlite3.connect("currency_system.db")
+            cursor = conn.cursor()
+
+            # Calculate total rewards
+            base_rewards = {
+                "penthouse-legendary": 750_000_000_000,  # 100 billion $QSE per week
+                "penthouse-og": 50_000_000_000,
+                "poly-the-parrot": 25_000_000_000,   # 30 billion $QSE per week
+                "realtor-license": 100_000_000_000,
+                "urban-penthouse": 45_000_000_000,
+                "stake-booster": 0.10,  # 10% bonus to overall staking rewards
+                "qse-genesis": 0.75
+            }
+
+            cursor.execute("SELECT nft, COUNT(*) FROM user_stakes GROUP BY nft")
+            total_stake_counts = cursor.fetchall()
+
+            total_rewards = sum(base_rewards[nft] * count for nft, count in total_stake_counts if nft in base_rewards and nft != "stake-booster" and nft != "qse-genesis")
+
+            weekly_rewards = total_rewards * 7
+
+            # Fetch all users who have staked
+            cursor.execute("SELECT DISTINCT user_id FROM user_stakes")
+            stakers = cursor.fetchall()
+
+            # Distribute rewards to each staker
+            for staker_id in stakers:
+                staker_id = staker_id[0]  # Extract user_id from the tuple
+
+                # Calculate staker's rewards based on their stakes
+                cursor.execute("SELECT nft, COUNT(*) FROM user_stakes WHERE user_id=? GROUP BY nft", (staker_id,))
+                staker_stake_counts = cursor.fetchall()
+                staker_rewards = 0
+
+                for nft, count in staker_stake_counts:
+                    if nft in base_rewards and nft != "stake-booster":
+                        base_reward = base_rewards[nft] * count
+                        staker_rewards += base_reward
+
+                # Check for stake-boosters and apply the bonus
+                stake_booster_count = next((count for nft, count in staker_stake_counts if nft == "stake-booster"), 0)
+                bonus_multiplier = base_rewards.get("stake-booster", 1.0)
+                bonus_rewards = staker_rewards * bonus_multiplier * stake_booster_count
+                staker_rewards += bonus_rewards
+
+                # Check for QSE Genesis and apply the 75% boost
+                qse_genesis_count = next((count for nft, count in staker_stake_counts if nft == "qse-genesis"), 0)
+                qse_genesis_boost = base_rewards.get("qse-genesis", 0.0)
+                staker_rewards += staker_rewards * qse_genesis_boost * qse_genesis_count
+
+                # Send rewards to the staker using the modified send_rewards function
+                await self.send_rewards(ctx, staker_id, staker_rewards)
+
+            await ctx.send(f"Weekly rewards distributed: {weekly_rewards:,.2f} $QSE to all stakers.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred: {e}")
+
+        finally:
+            # Close the connection
+            conn.close()
+
+    async def send_rewards(self, ctx, staker_id, staker_rewards):
+        bot_user_id = 1092870544988319905  # Replace with your bot's user ID
+        bot_p3_address = "P3:03da907038"  # Replace with your bot's P3 address
+
+        # Check if the bot has enough funds
+        bot_balance = get_user_balance(self.conn, bot_user_id)
+        if bot_balance < staker_rewards:
+            await ctx.send(f"Error: Bot doesn't have enough funds to send rewards to user {staker_id}.")
+            return
+
+        # Deduct rewards from the bot's balance
+        await self.send_from_reserve(ctx, staker_id, staker_rewards)
+
+        await ctx.send(f"Successfully sent {staker_rewards:,.2f} $QSE rewards to user {get_p3_address(self.P3addrConn, staker_id)}.")
+

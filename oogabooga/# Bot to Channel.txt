@@ -1,0 +1,18 @@
+# Bot to Channel
+
+
+
+    @commands.command(name='announce', help='Send an announcement to a specific channel.')
+    @is_allowed_user(930513222820331590, PBot)
+    async def announce(self, ctx, channel_id: int, *, message):
+        await ctx.message.delete()
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            await ctx.send("Invalid channel ID.")
+            return
+
+        await channel.send('@everyone ' + message)
+        await ctx.send(f'Announcement sent to {channel.mention}!')
+
+
+

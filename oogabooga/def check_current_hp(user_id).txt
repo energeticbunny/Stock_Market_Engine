@@ -1,0 +1,206 @@
+def check_current_hp(user_id):
+    try:
+        cursor = level_conn.cursor()
+        cursor.execute("SELECT cur_hp FROM users_rpg_stats WHERE user_id=?", (user_id,))
+        result = cursor.fetchone()
+        return result[0] if result else 0
+
+    except sqlite3.Error as e:
+        print(f"Error retrieving current HP for user {user_id}: {e}")
+        return 0
+
+def update_current_hp(user_id, new_hp):
+    try:
+        cursor = level_conn.cursor()
+        cursor.execute("UPDATE users_rpg_stats SET cur_hp=? WHERE user_id=?", (new_hp, user_id))
+        level_conn.commit()
+
+    except sqlite3.Error as e:
+        print(f"Error updating current HP for user {user_id}: {e}")
+
+create_users_level_table(level_conn)
+
+# Generate and insert experience values into the table
+max_level = 100  # Adjust the maximum level as needed
+experience_table = generate_experience_table(max_level)
+
+
+
+async def updown_limits(self, ctx, asset):
+    if asset in self.etfs:
+        current_price = await get_etf_value(self, ctx, int(asset))
+    else:
+        current_price = await get_stock_price(self, ctx, asset)
+
+
+    lower_limit, upper_limit = calculate_option_range(self, current_price)
+
+    return lower_limit, upper_limit, current_price
+
+def set_current_city(user_id, city):
+    try:
+        with level_conn:
+            level_conn.execute("INSERT OR REPLACE INTO users_rpg_cities (user_id, current_city, last_city, traveling, timestamp) VALUES (?, ?, ?, ?, ?)",
+                         (user_id, city, get_current_city(user_id), "No", None))
+    except sqlite3.Error as e:
+        print(f"Error setting current city for user {user_id}: {e}")
+
+def get_current_city(user_id):
+    try:
+        with level_conn:
+            cursor = level_conn.execute("SELECT current_city FROM users_rpg_cities WHERE user_id = ?", (user_id,))
+            result = cursor.fetchone()
+            return result[0] if result else None
+    except sqlite3.Error as e:
+        print(f"Error getting current city for user {user_id}: {e}")
+        return None
+
+def set_last_city(user_id, city):
+    try:
+        with level_conn:
+            level_conn.execute("UPDATE users_rpg_cities SET last_city = ? WHERE user_id = ?", (city, user_id))
+    except sqlite3.Error as e:
+        print(f"Error setting last city for user {user_id}: {e}")
+
+def set_traveling_status(user_id, status):
+    try:
+        with level_conn:
+            level_conn.execute("UPDATE users_rpg_cities SET traveling = ? WHERE user_id = ?", (status, user_id))
+    except sqlite3.Error as e:
+        print(f"Error setting traveling status for user {user_id}: {e}")
+
+# Function to get the last travel timestamp
+def get_last_travel_timestamp(self, user_id):
+    return self.last_travel.get(user_id, datetime.min)
+
+# Function to set the last travel timestamp
+def set_last_travel_timestamp(self, user_id, timestamp):
+    self.last_travel[user_id] = timestamp
+
+
+def can_travel(user_id):
+    last_timestamp = get_last_travel_timestamp(user_id)
+
+    if last_timestamp:
+        last_timestamp = datetime.strptime(last_timestamp, '%Y-%m-%d %H:%M:%S')  # Convert string to datetime
+
+        # Calculate the time difference
+        time_difference = datetime.now() - last_timestamp
+
+        # Compare the time difference with the travel cooldown
+        return time_difference >= calculate_travel_time()
+    else:
+        return True
+
+
+def travel_to_city(user_id, destination_city):
+    try:
+        with level_conn:
+            if can_travel(user_id):
+                set_last_city(user_id, get_current_city(user_id))
+                set_current_city(user_id, destination_city)
+                set_traveling_status(user_id, "No")
+                set_travel_timestamp(self, user_id)
+                return True
+            else:
+                return False  # User cannot travel yet
+    except sqlite3.Error as e:
+        print(f"Error initiating travel for user {user_id}: {e}")
+        return False
+
+
+def add_city_tax(user_id, tax):
+    city = get_current_city(user_id)
+    city_funds = get_city_qse(city)
+
+    try:
+        cursor = level_conn.cursor()
+
+        # Check if the city exists in user_city_stats
+        cursor.execute("SELECT COUNT(*) FROM user_city_stats WHERE city = ?", (city,))
+        city_exists = cursor.fetchone()[0] > 0
+
+        if not city_exists:
+            # City doesn't exist, create a new entry
+            cursor.execute("""
+                INSERT INTO user_city_stats (city, QSE, Resources, Stocks, ETPs)
+                VALUES (?, ?, COALESCE(?, 0), COALESCE(?, 0), COALESCE(?, 0))
+            """, (city, '0', None, None, None))
+            level_conn.commit()
+
+        # Update QSE amount in city statistics
+        city_tax = city_funds + Decimal(tax)
+        update_city_qse(city, str(city_tax))  # Convert the result back to text
+
+    except sqlite3.Error as e:
+        print(f"Error adding city tax: {e}")
+
+
+# Function to update QSE amount in city statistics
+def update_city_qse(city, new_qse_amount):
+    try:
+        cursor = level_conn.cursor()
+
+        # Update QSE amount in city statistics
+        cursor.execute("UPDATE user_city_stats SET QSE = ? WHERE city = ?", (new_qse_amount, city))
+        level_conn.commit()
+
+    except sqlite3.Error as e:
+        print(f"Error updating QSE amount in city statistics: {e}")
+
+# Function to get QSE amount from city statistics
+def get_city_qse(city):
+    try:
+        cursor = level_conn.cursor()
+
+        # Fetch QSE amount from city statistics
+        cursor.execute("SELECT QSE FROM user_city_stats WHERE city = ?", (city,))
+        result = cursor.fetchone()
+
+        # Check if the result is not None before extracting QSE value
+        if result is not None and result[0] is not None:
+            qse_amount = Decimal(result[0])  # Assuming QSE is now stored as text
+            return qse_amount
+        else:
+            return Decimal(0)
+
+    except sqlite3.Error as e:
+        print(f"Error fetching QSE amount from city statistics: {e}")
+        return Decimal(0)
+
+# Function to get city statistics
+def get_city_stats(city):
+    try:
+        cursor = level_conn.cursor()
+
+        # Fetch city statistics
+        cursor.execute("SELECT * FROM user_city_stats WHERE city = ?", (city,))
+        result = cursor.fetchone()
+
+        return result
+
+    except sqlite3.Error as e:
+        print(f"Error fetching city statistics: {e}")
+        return None
+
+# Function to update city statistics
+def update_city_stats(city, qse, resources, stocks, etps):
+    try:
+        cursor = level_conn.cursor()
+
+        # Convert values to integers if they are numeric
+        qse = Decimal(qse) if qse is not None else Decimal(0)
+        resources = Decimal(resources) if resources is not None else Decimal(0)
+        stocks = Decimal(stocks) if stocks is not None else Decimal(0)
+        etps = Decimal(etps) if etps is not None else Decimal(0)
+
+        # Update city statistics
+        cursor.execute("""
+            INSERT OR REPLACE INTO user_city_stats (city, QSE, Resources, Stocks, ETPs)
+            VALUES (?, ?, ?, ?, ?)
+        """, (city, str(qse), int(resources), int(stocks), int(etps)))
+
+        level_conn.commit()
+
+    except sqlite3.Error as e:
+        print(f"Error updating city statistics: {e}")

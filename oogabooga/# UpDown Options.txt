@@ -1,0 +1,405 @@
+# UpDown Options
+
+
+
+
+
+async def autoliquidate(self, ctx):
+    updown_assets = ["BlueChipOG"]
+    updown_assets.extend(self.etfs)
+
+    try:
+        orders_to_delete = []
+
+        for check_asset in updown_assets:
+            if check_asset in self.etfs:
+                asset_price = await get_etf_value(self, ctx, int(check_asset))
+            else:
+                asset_price = await get_stock_price(self, ctx, check_asset)
+
+            below_limit_users, above_limit_users = check_price_against_limits(self, asset_price, check_asset)
+
+            expired_contracts = get_expired_contracts(self)
+            if expired_contracts:
+                for _, _, _, _, _, _, order_id in expired_contracts:
+                    orders_to_delete.append(order_id)
+
+                expired_contracts.clear()
+
+            if below_limit_users:
+                for _, order_id in below_limit_users:
+                    orders_to_delete.append(order_id)
+
+                below_limit_users.clear()
+
+            if above_limit_users:
+                for _, order_id in above_limit_users:
+                    orders_to_delete.append(order_id)
+
+                above_limit_users.clear()
+
+        # Delete orders in bulk
+        await delete_orders(self, orders_to_delete)
+
+    except Exception as e:
+        print(f"An unexpected error occurred in autoliquidate: {e}")
+
+async def delete_orders(self, order_ids):
+    try:
+        cursor = self.conn.cursor()
+
+        # Check if order_ids is not empty
+        if not order_ids:
+            return True
+
+        # Convert the order_ids list to a NumPy array
+        order_ids_array = np.array(order_ids)
+
+        # Chunk the order_ids into smaller portions (chunk size can be adjusted)
+        chunk_size = 10000  # You can adjust this value based on your database's limit
+        for chunk in np.array_split(order_ids_array, np.ceil(len(order_ids_array) / chunk_size)):
+            print(f"{len(order_ids_array):,.0f}")
+            placeholders = ','.join('?' for _ in chunk)
+            query = f"DELETE FROM updown_orders WHERE order_id IN ({placeholders})"
+            cursor.execute(query, tuple(chunk))
+
+        self.conn.commit()
+        return True
+    except sqlite3.Error as e:
+        print(f"An error occurred while deleting orders: {e}")
+        return False
+
+
+
+async def update_city_config(self, ctx):
+    # Define the width of the ASCII window
+    window_width = 90
+
+    # Get Global Tax
+    tax_multiplier = self.calculate_tax_percentage(ctx, "tax_command")
+
+    # Iterate over each city in the city_config dictionary
+    for city, config in self.city_config.items():
+        # Save the old values for comparison
+        old_buy_margin = config["buy_margin"]
+        old_sell_margin = config["sell_margin"]
+        old_tax_rate = config["tax_rate"]
+
+        # Update buy and sell margins with slight daily changes
+        buy_margin_change = random.uniform(-0.001, 0.001)
+        buy_margin_change = buy_margin_change + (buy_margin_change * tax_multiplier)
+        config["buy_margin"] += buy_margin_change
+        sell_margin_change = random.uniform(-0.001, 0.001)
+        sell_margin_change = sell_margin_change + (sell_margin_change * tax_multiplier)
+        config["sell_margin"] += sell_margin_change
+
+        # Ensure margins are within bounds [0, 1]
+        config["buy_margin"] = min(max(config["buy_margin"], 0), 1)
+        config["sell_margin"] = min(max(config["sell_margin"], 0), 1)
+
+        # Update tax rate with slight daily changes
+        tax_rate_change = random.uniform(-0.01, 0.01)
+        tax_rate_change = tax_rate_change + (tax_rate_change * tax_multiplier)
+        config["tax_rate"] += tax_rate_change
+
+        # Ensure tax rate is within bounds [0, 1]
+        config["tax_rate"] = min(max(config["tax_rate"], 0), 1)
+
+        # Calculate percentage change for each parameter
+        buy_margin_change_percent = ((config["buy_margin"] - old_buy_margin) / old_buy_margin) * 100
+        sell_margin_change_percent = ((config["sell_margin"] - old_sell_margin) / old_sell_margin) * 100
+        tax_rate_change_percent = ((config["tax_rate"] - old_tax_rate) / old_tax_rate) * 100
+
+        # Display the changes in an ASCII window
+        print("+" + "-" * (window_width - 2) + "+")
+        print(f"|{'City Config Update':^{window_width - 2}}|")
+        print("+" + "-" * (window_width - 2) + "+")
+        print(f"| City: {city:<25} |")
+        print("+" + "-" * (window_width - 2) + "+")
+        print(f"| {'Parameter':<20} | {'Old Value':<15} | {'New Value':<15} | {'Change (%)':<15} |")
+        print("+" + "-" * (window_width - 2) + "+")
+        print(f"| {'Buy Margin':<20} | {(old_buy_margin * 100):.3f}% | {(config['buy_margin'] * 100):.3f}% | {buy_margin_change_percent:.2f}% |")
+        print(f"| {'Sell Margin':<20} | {(old_sell_margin * 100):.3f}% | {(config['sell_margin'] * 100):.3f}% | {sell_margin_change_percent:.2f}% |")
+        print(f"| {'Tax Rate':<20} | {(old_tax_rate * 100):.3f}% | {(config['tax_rate'] * 100):.3f}% | {tax_rate_change_percent:.2f}% |")
+        print("+" + "-" * (window_width - 2) + "+")
+
+    print("City config updated successfully.")
+
+
+def count_user_contracts(self, user_id, asset):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT COUNT(*) FROM updown_orders
+            WHERE user_id = ? AND asset = ? AND expiration > CURRENT_TIMESTAMP
+        """, (user_id, asset))
+        result = cursor.fetchone()
+
+        if result:
+            return result[0]
+        else:
+            return 0
+    except sqlite3.Error as e:
+        print(f"An error occurred while counting user contracts: {e}")
+        return 0
+
+def get_total_current_prices(self):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT SUM(current_price)
+            FROM updown_orders
+            WHERE expiration > CURRENT_TIMESTAMP
+        """)
+        total_current_prices = cursor.fetchone()[0]
+
+        return total_current_prices if total_current_prices else 0
+    except sqlite3.Error as e:
+        print(f"An error occurred while getting total current prices: {e}")
+        return 0
+
+def check_price_against_limits(self, price, asset):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT user_id, lower_limit, upper_limit, order_id
+            FROM updown_orders
+            WHERE asset = ? AND expiration > CURRENT_TIMESTAMP
+        """, (asset,))
+        results = cursor.fetchall()
+
+        user_data_below_lower_limit = []
+        user_data_above_upper_limit = []
+
+        for result in results:
+            user_id, lower_limit, upper_limit, order_id = result
+
+            if price < lower_limit:
+                user_data_below_lower_limit.append((user_id, order_id))
+            elif price > upper_limit:
+                user_data_above_upper_limit.append((user_id, order_id))
+
+        return user_data_below_lower_limit, user_data_above_upper_limit
+    except sqlite3.Error as e:
+        print(f"An error occurred while checking price against limits: {e}")
+        return [], []
+
+
+
+def get_expired_contracts(self):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT user_id, asset, current_price, lower_limit, upper_limit, expiration, order_id
+            FROM updown_orders
+            WHERE expiration <= CURRENT_TIMESTAMP
+        """)
+        expired_contracts = cursor.fetchall()
+
+        return expired_contracts
+    except sqlite3.Error as e:
+        print(f"An error occurred while getting expired contracts: {e}")
+        return []
+
+def close_all_contracts(self):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            UPDATE updown_orders
+            SET expiration = CURRENT_TIMESTAMP
+            WHERE expiration > CURRENT_TIMESTAMP
+        """)
+        self.conn.commit()
+        return True
+    except sqlite3.Error as e:
+        print(f"An error occurred while closing all contracts: {e}")
+        return False
+
+def close_all_contracts_user(self, user_id):
+    try:
+        cursor = self.conn.cursor()
+
+        # Delete all rows where user_id matches and expiration is in the future
+        cursor.execute("""
+            DELETE FROM updown_orders
+            WHERE user_id = ? AND expiration > CURRENT_TIMESTAMP
+        """, (user_id,))
+
+        # Commit the changes to the database
+        self.conn.commit()
+
+        # Indicate that the operation was successful
+        return True
+
+    except sqlite3.Error as e:
+        # Print an error message if an exception occurs
+        print(f"An error occurred while closing all contracts: {e}")
+
+        # Indicate that the operation was not successful
+        return False
+
+
+async def add_updown_order(self, user_id, asset, current_price, quantity, lower_limit, upper_limit, contract_date, expiration):
+    try:
+        async with aiosqlite.connect("currency_system.db") as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("""
+                INSERT INTO updown_orders (user_id, asset, current_price, quantity, lower_limit, upper_limit, contract_date, expiration)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, asset, current_price, quantity, lower_limit, upper_limit, contract_date, expiration))
+            await conn.commit()
+            print("Updown order added successfully.")
+    except sqlite3.Error as e:
+        print(f"Error adding updown order: {e}")
+
+async def remove_updown_order(self, order_id):
+    try:
+        async with sqlite3.connect("currency_system.db") as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("""
+                DELETE FROM updown_orders WHERE order_id=?
+            """, (order_id,))
+            await conn.commit()
+            print("Updown order removed successfully.")
+    except sqlite3.Error as e:
+        print(f"Error removing updown order: {e}")
+
+async def update_updown_order(self, order_id, new_quantity, new_lower_limit, new_upper_limit, new_expiration):
+    try:
+        async with aiosqlite.connect("currency_system.db") as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("""
+                UPDATE updown_orders
+                SET quantity=?, lower_limit=?, upper_limit=?, expiration=?
+                WHERE order_id=?
+            """, (new_quantity, new_lower_limit, new_upper_limit, new_expiration, order_id))
+            await conn.commit()
+            print("Updown order updated successfully.")
+    except sqlite3.Error as e:
+        print(f"Error updating updown order: {e}")
+
+async def liquidate_updown_order(self, order_id):
+    try:
+        async with aiosqlite.connect("currency_system.db") as conn:
+            cursor = await conn.cursor()
+            await cursor.execute("""
+                DELETE FROM updown_orders WHERE order_id=?
+            """, (order_id,))
+            await conn.commit()
+            print("Updown order liquidated successfully.")
+    except sqlite3.Error as e:
+        print(f"Error liquidating updown order: {e}")
+
+async def read_updown_contracts(self, user_id=None, asset=None):
+    try:
+        async with aiosqlite.connect("currency_system.db") as conn:
+            cursor = await conn.cursor()
+            query = "SELECT * FROM updown_orders"
+            if user_id:
+                query += " WHERE user_id=?"
+            if asset:
+                if user_id:
+                    query += " AND asset=?"
+                else:
+                    query += " WHERE asset=?"
+            await cursor.execute(query, (user_id, asset))
+            contracts = await cursor.fetchall()
+            return contracts
+    except sqlite3.Error as e:
+        print(f"Error reading updown contracts: {e}")
+
+
+def get_current_price(self, user_id):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT current_price FROM updown_orders WHERE user_id = ?
+        """, (user_id,))
+        result = cursor.fetchone()
+        return result[0] if result else None
+    except sqlite3.Error as e:
+        print(f"An error occurred while getting current price: {e}")
+
+def check_expiration_status(self, user_id):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT expiration FROM updown_orders WHERE user_id = ?
+        """, (user_id,))
+        result = cursor.fetchone()
+        if result:
+            expiration_time = datetime.strptime(result[0], "%Y-%m-%d %H:%M:%S")
+            current_time = datetime.now()
+            return current_time > expiration_time
+        else:
+            return None
+    except sqlite3.Error as e:
+        print(f"An error occurred while checking expiration status: {e}")
+
+
+async def get_user_options(self, user_id):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM updown_orders
+            WHERE user_id = ? AND expiration > CURRENT_TIMESTAMP
+        """, (user_id,))
+        results = cursor.fetchall()
+
+        user_options = []
+        for result in results:
+            user_option = {
+                "asset": result[1],
+                "current_price": result[2],
+                "lower_limit": result[3],
+                "upper_limit": result[4],
+                "contract_date": result[5],
+                "expiration": result[6],
+            }
+            user_options.append(user_option)
+
+        return user_options
+    except sqlite3.Error as e:
+        print(f"An error occurred while getting user options: {e}")
+        return []
+
+
+async def calculate_average_prices_by_symbol(self, symbol):
+    try:
+        async with aiosqlite.connect("p3ledger.db") as ledger_conn:
+            ledger_conn.row_factory = aiosqlite.Row
+
+            query = """
+                SELECT
+                    AVG(CASE WHEN action='Buy Stock' THEN price END) as average_buy_price,
+                    AVG(CASE WHEN action='Sell Stock' THEN price END) as average_sell_price
+                FROM stock_transactions
+                WHERE symbol=? AND (action='Buy Stock' OR action='Sell Stock')
+                ORDER BY timestamp
+            """
+            async with ledger_conn.execute(query, (symbol,)) as result:
+                row = await result.fetchone()
+
+            if row:
+                average_buy_price = row["average_buy_price"] or 0
+                average_sell_price = row["average_sell_price"] or 0
+                return average_buy_price, average_sell_price
+            else:
+                return 0, 0
+
+    except aiosqlite.Error as e:
+        print(f"Error accessing ledger database: {e}")
+        return 0, 0
+## End UpDown
+
+
+
+
+
+def calculate_option_range(self, current_price):
+    lower_limit = current_price * (1 - self.UpDownPerRange)
+    upper_limit = current_price * (1 + self.UpDownPerRange)
+    return lower_limit, upper_limit
+
+
+## End UpDown

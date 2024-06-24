@@ -1,0 +1,97 @@
+## Futures
+
+def place_futures_order(self, user_id, symbol, order_type, price, quantity, expiration):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO futures_orders (user_id, symbol, order_type, price, quantity, expiration)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (user_id, symbol, order_type, price, quantity, expiration))
+        self.conn.commit()
+        return True
+    except sqlite3.Error as e:
+        print(f"Error placing futures order: {e}")
+        return False
+
+def check_futures_orders(self, current_price, symbol):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT user_id, order_type, price, quantity, expiration
+            FROM futures_orders
+            WHERE symbol = ? AND expiration > CURRENT_TIMESTAMP
+        """, (symbol,))
+        results = cursor.fetchall()
+
+        liquidation_candidates = []
+
+        for result in results:
+            user_id, order_type, price, quantity, expiration = result
+
+            if (order_type == 'buy' and price >= current_price) or (order_type == 'sell' and price <= current_price):
+                liquidation_candidates.append({
+                    'user_id': user_id,
+                    'order_type': order_type,
+                    'quantity': quantity,
+                    'profit_loss': (current_price - price) * quantity
+                })
+
+        return liquidation_candidates
+    except sqlite3.Error as e:
+        print(f"Error checking futures orders: {e}")
+        return []
+
+async def calculate_buy_price(self, ctx, stock_name, amount):
+    try:
+        cursor = self.conn.cursor()
+        # Retrieve stock information
+        cursor.execute("SELECT * FROM stocks WHERE symbol=?", (stock_name,))
+        stock = cursor.fetchone()
+#        price = Decimal(stock[2])
+#        price = int(price)
+        price = await get_stock_price(self, ctx, stock_name)
+        supply_stats = await get_supply_stats(self, ctx, stock_name)
+
+        reserve, total, locked, escrow, market, circulating = supply_stats
+        supply_a = market if market != 0 else escrow
+
+        if total == 0:
+            # Handle the case where total is zero to avoid division by zero
+            return None
+
+        # Calculate the buy price
+        calculated_buy_price = abs(price * 0.05 * (1 - supply_a / total) * (1 - amount / total) + price)
+
+        # Ensure that the buy price increases by at least 0.01%
+        min_increase_percentage = 0.01
+        min_increase_amount = price * min_increase_percentage / 100
+
+        final_buy_price = max(calculated_buy_price, price + min_increase_amount)
+
+        return final_buy_price
+
+    except Exception as e:
+        # Handle exceptions (e.g., network errors, API issues)
+        print(f"Error calculating buy price: {e}")
+        return None
+
+
+def liquidate_futures_order(self, user_id, order_type, quantity, profit_loss):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            DELETE FROM futures_orders
+            WHERE user_id = ? AND order_type = ? AND quantity = ?
+        """, (user_id, order_type, quantity))
+        self.conn.commit()
+
+        # Perform actions based on liquidation (e.g., update user balance)
+        # ...
+
+        return True
+    except sqlite3.Error as e:
+        print(f"Error liquidating futures order: {e}")
+        return False
+
+
+## End Derivatives

@@ -1,0 +1,1736 @@
+# Economy Engine
+
+async def send_stock(self, ctx, target, sender, symbol: str, amount: int, verbose: bool = True):
+    cursor = self.conn.cursor()
+    target_user_id = get_user_id(self.P3addrConn, target)
+    sender_user_id = get_user_id(self.P3addrConn, sender)
+
+    # Define the width of the ASCII-like debug window
+    window_width = 70
+
+    # Display debug information in a bordered ASCII-like window
+    def debug_print(message):
+        print("+" + "-" * (window_width - 2) + "+")
+        print(f"|{'Stock Transfer':^{window_width - 2}}|")
+        print("+" + "-" * (window_width - 2) + "+")
+        for line in message.split('\n'):
+            print(f"| {line:<{window_width - 3}} |")
+        print("+" + "-" * (window_width - 2) + "+")
+
+    # Validate P3 address
+    if not target.startswith("P3:"):
+        await ctx.send("Please provide a valid P3 address.")
+        return False
+
+    # Validate amount
+    if not isinstance(amount, int) or amount <= 0:
+        await ctx.send("Please provide a valid positive integer amount.")
+        return False
+
+    # Check if the stock exists.
+    cursor.execute("SELECT symbol, available FROM stocks WHERE symbol=?", (symbol,))
+    stock = cursor.fetchone()
+    if stock is None:
+        await ctx.send(f"No stock with symbol {symbol} found.")
+        return False
+
+    # Check if there's enough of the stock available in the user's stash.
+    cursor.execute("SELECT amount FROM user_stocks WHERE user_id=? AND symbol=?", (sender_user_id, symbol))
+    user_stock = cursor.fetchone()
+    if user_stock is None or user_stock['amount'] < amount:
+        await ctx.send(f"Not enough of {symbol} available in your stash.")
+        return False
+
+    try:
+        # Deduct the stock from the user's stash.
+        new_amount = user_stock['amount'] - amount
+        cursor.execute("UPDATE user_stocks SET amount=? WHERE user_id=? AND symbol=?", (new_amount, sender_user_id, symbol))
+
+        # Update the recipient's stocks.
+        cursor.execute("SELECT amount FROM user_stocks WHERE user_id=? AND symbol=?", (target_user_id, symbol))
+        recipient_stock = cursor.fetchone()
+        if recipient_stock is None:
+            cursor.execute("INSERT INTO user_stocks(user_id, symbol, amount) VALUES(?, ?, ?)", (target_user_id, symbol, amount))
+        else:
+            new_amount = recipient_stock['amount'] + amount
+            cursor.execute("UPDATE user_stocks SET amount=? WHERE user_id=? AND symbol=?", (new_amount, target_user_id, symbol))
+
+        self.conn.commit()
+
+
+        # Log the stock transfer
+        debug_print(f"Sent {amount:,.0f} of {symbol}\n\n"
+                    f"Available Shares: {stock['available']:,.2f} -> {stock['available'] - amount:,.2f}\n\n"
+                    f"From:{sender}({user_stock['amount']:,}) -> To:{target}({new_amount:,})")
+
+        if verbose:
+            await ctx.send(f"Sent {amount:,} of {symbol} to {target}.")
+        return True
+
+    except Exception as e:
+        # Handle exceptions (rollback changes if necessary)
+        self.conn.rollback()
+        debug_print(f"An error occurred during the stock transfer: {e}")
+        await ctx.send(f"An error occurred during the stock transfer: {e}")
+        return False
+
+
+async def get_weighted_metrics(self, symbol):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT
+                SUM(price * quantity) / sum(quantity) AS total_price,
+                SUM(quantity) AS total_volume
+            FROM limit_orders
+            WHERE symbol = ? AND order_type = 'sell';
+        """, (symbol,))
+
+        weighted_metrics = cursor.fetchone()
+
+        # Check for None and provide default values
+        return weighted_metrics if weighted_metrics else (0, 1)  # Default values to prevent division by zero
+
+    except sqlite3.Error as e:
+        print(f"An error occurred while fetching weighted metrics: {e}")
+        return None
+
+async def get_weighted_average_price(self, ctx, symbol):
+    try:
+        cursor = self.conn.cursor()
+
+        # Fetch total market capitalization from the existing market
+        cursor.execute("""
+            SELECT
+                SUM(price * quantity) AS total_price,
+                SUM(quantity) AS total_volume
+            FROM limit_orders
+            WHERE symbol = ? AND order_type = 'sell';
+        """, (symbol,))
+        weighted_metrics = cursor.fetchone()
+
+        if not weighted_metrics or None in weighted_metrics:
+            print(f"No data found or incomplete data for symbol {symbol}")
+            return None
+
+        # Unpack the weighted metrics
+        total_price, total_volume = weighted_metrics
+
+        # Check if total_volume is 0 to avoid division by zero
+        if total_volume == 0:
+            return 0
+
+        # Calculate the weighted average price
+        weighted_average_price = total_price / total_volume
+
+        highest_sell_order = await highest_price_order(self, ctx, "sell", symbol)
+
+        return weighted_average_price
+
+    except sqlite3.Error as e:
+        print(f"An error occurred while fetching weighted average price: {e}")
+        return None
+
+
+def remove_order(conn: Connection, order_id: int):
+    try:
+        with conn:
+            conn.execute("DELETE FROM limit_orders WHERE order_id = ?", (order_id,))
+        print(f"Order {order_id} removed successfully.")
+    except sqlite3.Error as e:
+        print(f"An error occurred while removing order {order_id}: {e}")
+
+def update_order_quantity(conn: Connection, order_id: int, new_quantity: int):
+    try:
+        with conn:
+            conn.execute("UPDATE limit_orders SET quantity = :new_quantity WHERE order_id = :order_id",
+                         {"new_quantity": new_quantity, "order_id": order_id})
+        print(f"Order {order_id} quantity updated to {new_quantity} successfully.")
+    except sqlite3.Error as e:
+        print(f"An error occurred while updating quantity for order {order_id}: {e}")
+
+async def fetch_sell_orders(self, stock_name):
+    cursor = self.conn.cursor()
+
+    # Fetch sell orders for the specified stock
+    cursor.execute("""
+        SELECT * FROM limit_orders
+        WHERE symbol = ? AND order_type = 'sell'
+        ORDER BY price ASC, created_at ASC
+    """, (stock_name,))
+    return cursor.fetchall()
+
+
+async def fetch_buy_orders(self, stock_name):
+    cursor = self.conn.cursor()
+
+    # Fetch sell orders for the specified stock
+    cursor.execute("""
+        SELECT * FROM limit_orders
+        WHERE symbol = ? AND order_type = 'buy'
+        ORDER BY price DESC, created_at ASC
+    """, (stock_name,))
+    return cursor.fetchall()
+
+async def display_transaction_details(ctx, p3addr, stock_name, amount):
+    # Fetch relevant details for displaying transaction details
+    current_balance = get_user_balance(self.conn, ctx.author.id)
+    new_balance = get_user_balance(self.conn, ctx.author.id)
+
+    # Display the transaction details
+    color = discord.Color.green()
+    embed = discord.Embed(title=f"Stock Transaction Completed", color=color)
+    embed.add_field(name="Address:", value=f"{p3addr}", inline=False)
+    embed.add_field(name="Stock:", value=f"{stock_name}", inline=False)
+    embed.add_field(name="Amount:", value=f"{amount:,.2f}", inline=False)
+    embed.add_field(name="New Balance:", value=f"{new_balance:,.2f} $QSE", inline=False)
+    embed.set_footer(text=f"Timestamp: {datetime.utcnow()}")
+
+    # Send the transaction details to the user
+    await ctx.send(embed=embed)
+
+async def asset_type(self, ctx, symbol):
+    cursor = self.conn.cursor()
+    ETP = "etp"
+    ITEM = "item"
+    STOCK = "stock"
+
+    # Check if the item exists in the marketplace
+    cursor.execute("SELECT item_id, price, is_usable FROM items WHERE item_name=?", (symbol,))
+    item_data = cursor.fetchone()
+
+    # Retrieve stock information
+    cursor.execute("SELECT * FROM stocks WHERE symbol=?", (symbol,))
+    stock_data = cursor.fetchone()
+
+    if item_data:
+        return ITEM
+    if stock_data:
+        return STOCK
+
+
+async def swap_item(self, ctx, order_type, symbol, amount):
+    try:
+        cursor.execute("""
+            INSERT INTO inventory (user_id, item_id, quantity)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, item_id) DO UPDATE SET quantity = quantity + ?
+        """, (user_id, item_id, quantity, quantity))
+    except sqlite3.Error as e:
+        await ctx.send(f"{ctx.author.mention}, an error occurred while updating user inventory. Error: {str(e)}")
+        return
+
+async def get_item_info(self, ctx, symbol):
+    user_id = ctx.author.id
+    cursor = self.conn.cursor()
+
+    # Fetch user's inventory
+    cursor.execute("""
+        SELECT items.item_name, items.item_description, inventory.quantity, items.price
+        FROM inventory
+        JOIN items ON inventory.item_id = items.item_id
+        WHERE user_id=?
+    """, (user_id,))
+    inventory_data = cursor.fetchall()
+
+    if not inventory_data:
+        await ctx.send(f"{ctx.author.mention}, your inventory is empty.")
+        return
+
+    # Initialize variables outside the loop
+    item_info = None
+    total_value = 0
+
+    for item in inventory_data:
+        if item[0].lower() == symbol.lower():
+            item_name = item[0]
+            item_description = item[1] or "No description available"
+            quantity = Decimal(item[2])
+            item_price = Decimal(item[3])  # Convert the item price to Decimal
+
+            # Calculate the total value for the item
+            item_value = item_price * quantity
+            total_value += item_value
+
+            # Store the item information in a tuple
+            item_info = (item_name, item_description, quantity, item_price, item_value)
+
+    if item_info:
+        return item_info, total_value
+    else:
+        await ctx.send(f"{ctx.author.mention}, the item '{symbol}' was not found in your inventory.")
+
+
+async def check_smart_contract(self, ctx):
+    if self.contract_pool:
+        self.is_paused = True
+        async with self.transaction_lock:
+            print("Running Contract Pool")
+            for contract in self.contract_pool:
+                if contract[0] == "chart":
+                    await self.stock_chart(contract[2], contract[3], contract[4], contract[5], contract[6], contract[7], contract[8])
+                    self.is_paused = False
+
+async def check_recent_travel(self, ctx):
+    user_id = ctx.author.id
+    last_travel_timestamp = get_last_travel_timestamp(self, user_id)
+    cooldown_duration = timedelta(hours=1)
+
+    if (datetime.now() - last_travel_timestamp) < cooldown_duration:
+        # Calculate the amount of QSE to be paid for early travel
+        qse_cost = 100  # Example QSE cost for early travel, adjust as needed
+
+        # Prompt the user to pay QSE for early travel
+        confirmation_message = await ctx.send(f"You have recently traveled. Do you want to pay {qse_cost} QSE to travel early? (yes/no)")
+
+        try:
+            # Wait for the user's response
+            def check(message):
+                return message.author == ctx.author and message.channel == ctx.channel and message.content.lower() in ['yes', 'no']
+
+            response = await ctx.bot.wait_for('message', check=check, timeout=30)
+
+            if response.content.lower() == 'yes':
+                # Deduct QSE from user's account
+                # Add code to deduct QSE from the user's account
+                await ctx.send(f"{qse_cost} QSE has been deducted from your account.")
+                return True
+            else:
+                await ctx.send("Travel cancelled.")
+                return False
+
+        except asyncio.TimeoutError:
+            await confirmation_message.delete()
+            await ctx.send("You took too long to respond. Travel cancelled.")
+            return False
+    else:
+        # No recent travel, continue with travel
+        return True
+
+
+
+async def add_contract_pool(self, ctx, contract):
+    if contract:
+        a = 1
+
+async def add_limit_order(self, ctx, symbol, price, quantity):
+    user_id = PBot
+    order_type = "sell"
+    cursor = self.conn.cursor()
+    cursor.execute("""
+        INSERT INTO limit_orders (user_id, symbol, order_type, price, quantity)
+        VALUES (?, ?, ?, ?, ?)
+    """, (user_id, symbol, order_type, price, quantity))
+    order_id = cursor.lastrowid
+    self.conn.commit()
+
+
+
+async def unlock_share_limit(self, ctx, symbol, percentage, type):
+    user_id = ctx.author.id
+
+    if user_id in self.ceo_stocks:
+        user_stocks = self.ceo_stocks[user_id]
+
+        if symbol.lower() in user_stocks:
+            total_supply, current_supply = await get_supply_info(self, ctx, symbol)
+            amount = (Decimal(percentage) / 100) * Decimal(total_supply)
+            await self.unlock_shares(ctx, symbol, int(amount), type)
+
+
+async def get_total_shares_user_order(self, user_id, symbol):
+    try:
+        cursor = self.conn.cursor()
+
+        # Get the total amount of shares for the specified user and stock
+        cursor.execute("""
+            SELECT COALESCE(SUM(quantity), 0) as total_shares
+            FROM limit_orders
+            WHERE user_id = ? AND symbol = ?
+        """, (user_id, symbol))
+        result = cursor.fetchone()
+
+        return result["total_shares"]
+
+    except sqlite3.Error as e:
+        print(f"An error occurred while getting total shares: {e}")
+        return 0  # Return 0 in case of an error
+
+async def add_limit_orders(self, ctx, orders, verbose: bool = True):
+    P3addrConn = sqlite3.connect("P3addr.db")
+    PBotAddr = get_p3_address(P3addrConn, PBot)
+
+    order_length = len(orders)
+    if verbose:
+        embed = discord.Embed(description="New Limit Order")
+        embed.add_field(name="Creating Limit Order", value=f"Orders: {order_length:,.0f}", inline=False)
+
+        await ctx.send(embed=embed)
+    order_id_list = []
+    for order in orders:
+
+
+        order_self = order[0]
+        order_ctx = order[1]
+        order_user_id = order[2]
+        order_symbol = order[3]
+        order_order_type = order[4]
+        order_price = order[5]
+        order_chunk_quantity = order[6]
+        if ',' in str(order_price):
+            new_price = order_price.replace(",", "")
+            new_price = round(float(new_price))
+        else:
+            new_price = round(float(order_price))
+        mp = await get_stock_price(self, ctx, order_symbol)
+        print_order_placed(order_user_id, order_symbol, order_order_type, order_price, mp, order_chunk_quantity, 1,  get_p3_address(self.P3addrConn, order_user_id))
+        order_length -= 1
+        if order_order_type.lower() == "sell":
+            result = await send_stock(self, ctx, self.bot_address, get_p3_address(self.P3addrConn, order_user_id), order_symbol, order_chunk_quantity, False)
+            if not result:
+                return
+        else:
+            tax_percentage = self.calculate_tax_percentage(ctx, "buy_stock")
+            cost = order_price * order_chunk_quantity
+            fee = Decimal(cost) * Decimal(tax_percentage)
+            total = int(cost) + int(fee)
+            await self.give_addr(ctx, PBotAddr, int(total), False)
+
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            INSERT INTO limit_orders (user_id, symbol, order_type, price, quantity)
+            VALUES (?, ?, ?, ?, ?)
+        """, (order_user_id, order_symbol, order_order_type, order_price, order_chunk_quantity))
+        order_id_list.append(cursor.lastrowid)
+
+        self.conn.commit()
+
+    if verbose:
+        embed = discord.Embed(description="Limit order added successfully.")
+        embed.add_field(name="Order IDs:", value=f"{order_id_list[0]:,.0f}-{order_id_list[(len(order_id_list) - 1)]:,.0f}", inline=False)
+        embed.add_field(name="Address:", value=f"{get_p3_address(P3addrConn, order_user_id)}", inline=False)
+        embed.add_field(name="Stock:", value=f"{order_symbol}", inline=False)
+        embed.add_field(name="Quantity:", value=f"{order_chunk_quantity:,.0f} per order", inline=False)
+        embed.add_field(name="Order Type:", value=f"{order_order_type}", inline=False)
+        embed.add_field(name="Price:", value=f"{order_price}", inline=False)
+        embed.add_field(name="Value:", value=f"{(new_price * order_chunk_quantity):,.2f}", inline=False)
+        await ctx.send(embed=embed)
+
+
+
+async def add_limit_orders2(self, ctx, orders, verbose: bool = True):
+    P3addrConn = sqlite3.connect("P3addr.db")
+    PBotAddr = get_p3_address(P3addrConn, PBot)
+
+    order_length = len(orders)
+    embed = discord.Embed(description="New Limit Order")
+    embed.add_field(name="Creating Limit Order", value=f"Orders: {order_length:,.0f}", inline=False)
+
+    await ctx.send(embed=embed)
+
+    order_id_list = []
+
+    # Reuse a single database connection
+    cursor = self.conn.cursor()
+
+    for order in orders:
+        (
+            order_self, order_ctx, order_user_id, order_symbol,
+            order_order_type, order_price, order_chunk_quantity
+        ) = order
+
+        print(f"""
+            {order_self}
+            {order_ctx}
+            {order_user_id}
+            {order_symbol}
+            {order_order_type}
+            {order_price:,.0f}
+            {order_chunk_quantity:,.0f}
+            {(order_length):,.0f}
+        """)
+
+        order_length -= 1
+
+        if verbose:
+            if order_order_type.lower() == "sell" and order_user_id != PBot:
+                result = await send_stock(self, ctx, self.bot_address, get_p3_address(P3addrConn, order_user_id), order_symbol, order_chunk_quantity, False)
+                if not result:
+                    return
+            else:
+                tax_percentage = self.calculate_tax_percentage(ctx, "buy_stock")
+                cost = order_price * order_chunk_quantity
+                fee = Decimal(cost) * Decimal(tax_percentage)
+                total = int(cost) + int(fee)
+                await self.give_addr(ctx, PBotAddr, int(total), False)
+
+        # Append the values to the list
+        order_id_list.append(cursor.lastrowid)
+
+    # Execute a bulk insertion
+    cursor.executemany("""
+        INSERT INTO limit_orders (user_id, symbol, order_type, price, quantity)
+        VALUES (?, ?, ?, ?, ?)
+    """, [(order[2], order[3], order[4], order[5], order[6]) for order in orders])
+
+    # Commit the changes
+    self.conn.commit()
+
+    if verbose:
+        embed = discord.Embed(description="Limit order added successfully.")
+        embed.add_field(name="Order IDs:", value=f"{order_id_list[0]:,.0f}-{order_id_list[-1]:,.0f}", inline=False)
+        embed.add_field(name="Address:", value=f"{get_p3_address(P3addrConn, order_user_id)}", inline=False)
+        embed.add_field(name="Stock:", value=f"{order_symbol}", inline=False)
+        embed.add_field(name="Quantity:", value=f"{order_chunk_quantity:,.0f} per order", inline=False)
+        embed.add_field(name="Order Type:", value=f"{order_order_type}", inline=False)
+        embed.add_field(name="Price:", value=f"{order_price:,.2f}", inline=False)
+        embed.add_field(name="Value:", value=f"{(order_price * order_chunk_quantity):,.2f}", inline=False)
+        await ctx.send(embed=embed)
+
+
+
+async def add_mv_metric(self, ctx, mv):
+    cursor = self.conn.cursor()
+    cursor.execute("""
+        INSERT INTO market_value (mv)
+        VALUES (?)
+    """, (mv,))
+    self.conn.commit()
+
+
+
+
+
+async def add_etf_metric(self, ctx):
+    cursor = self.conn.cursor()
+
+    for i in self.etfs:
+        if i != "6":
+            mv = await get_etf_value(self, ctx, i)
+            cursor.execute(f"""
+                INSERT INTO etf_{i}_value (mv)
+                VALUES (?)
+            """, (mv,))
+
+            self.conn.commit()
+
+
+async def add_metal_metric(self, ctx):
+    cursor = self.conn.cursor()
+    for item_name in self.metals:
+        current_price, _, _, _, _ = await self.item_supply_info(ctx, item_name)
+        print(f"{item_name} and {current_price}")
+        mv = str(current_price)
+
+        cursor.execute(f"""
+            INSERT INTO metal_value ({item_name})
+            VALUES (?)
+        """, (mv,))
+
+    self.conn.commit()
+    print("Metal metrics added successfully")
+
+async def add_reserve_metric(self, ctx):
+    cursor = self.conn.cursor()
+
+    # Calculate total stock value
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (PBot,))
+    row = cursor.fetchone()
+    qse = row[0]
+    # Calculate total stock value
+    cursor.execute("SELECT symbol, amount FROM user_stocks WHERE user_id=?", (PBot,))
+    user_stocks = cursor.fetchall()
+    stocks = 0
+
+    for symbol, amount in user_stocks:
+        cursor.execute("SELECT price FROM stocks WHERE symbol=?", (symbol,))
+        stock_price_row = cursor.fetchone()
+        stock_price = stock_price_row[0] if stock_price_row else 0
+        stocks += stock_price * amount
+
+
+    total = qse + stocks
+
+    cursor.execute("""
+        INSERT INTO reserve_value (qse, stocks, total)
+        VALUES (?, ?, ?)
+    """, (qse, stocks, total,))
+    self.conn.commit()
+
+
+async def calculate_average_mv(self):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT SUM(mv), COUNT(mv) FROM market_value")
+        result = cursor.fetchone()
+
+        if not result or result[1] == 0:
+            return None  # Return None for an empty table or zero count
+
+        total_mv, count = result
+        average = total_mv / count
+        return average
+    except sqlite3.Error as e:
+        print(f"An error occurred while calculating the average: {str(e)}")
+        return None
+
+
+async def remove_zero_quantity_orders_from_db(self, ctx, symbol):
+    cursor = self.conn.cursor()
+
+    # Fetch orders with quantity 0 for the specified symbol
+    cursor.execute("SELECT * FROM limit_orders WHERE symbol=? AND quantity=0", (symbol,))
+    zero_quantity_orders = cursor.fetchall()
+
+    for order in zero_quantity_orders:
+        order_id = order['order_id']
+        await self.remove_limit_order_command(ctx, order_id)
+
+    # Optionally, you can fetch the updated list after removal
+    updated_orders = await fetch_sell_orders(self, symbol)
+    return updated_orders
+
+
+async def remove_limit_order(self, ctx, order_id):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM limit_orders WHERE order_id=?", (order_id,))
+        self.conn.commit()
+    except sqlite3.Error as e:
+        await ctx.send(f"An error occurred while removing a limit order: {e}")
+
+async def remove_limit_orders(self, ctx, order_ids):
+    if not order_ids:
+        return  # No order IDs to remove
+
+    try:
+        cursor = self.conn.cursor()
+        placeholders = ', '.join(['?'] * len(order_ids))
+        cursor.execute(f"DELETE FROM limit_orders WHERE order_id IN ({placeholders})", order_ids)
+        self.conn.commit()
+    except sqlite3.Error as e:
+        await ctx.send(f"An error occurred while removing limit orders: {e}")
+
+
+def add_quantity_to_limit_order(self, order_id, amount):
+    try:
+        cursor = self.conn.cursor()
+
+        # Check if the order_id exists
+        cursor.execute("SELECT * FROM limit_orders WHERE order_id=?", (order_id,))
+        existing_order = cursor.fetchone()
+
+        if existing_order:
+            current_quantity = existing_order['quantity']
+            new_quantity = current_quantity + amount
+
+            # Update the quantity for the specified order_id
+            cursor.execute("UPDATE limit_orders SET quantity=? WHERE order_id=?", (new_quantity, order_id))
+            self.conn.commit()
+
+            print(f"Added {amount} to quantity of order_id {order_id}. New quantity: {new_quantity}")
+        else:
+            print(f"No order found with order_id {order_id}")
+
+    except sqlite3.Error as e:
+        print(f"An error occurred while adding quantity to limit order: {e}")
+
+def remove_quantity_from_limit_order(self, order_id, amount):
+    try:
+        cursor = self.conn.cursor()
+
+        # Check if the order_id exists
+        cursor.execute("SELECT * FROM limit_orders WHERE order_id=?", (order_id,))
+        existing_order = cursor.fetchone()
+
+        if existing_order:
+            current_quantity = existing_order['quantity']
+
+            if current_quantity >= amount:
+                new_quantity = current_quantity - amount
+
+                # Update the quantity for the specified order_id
+                cursor.execute("UPDATE limit_orders SET quantity=? WHERE order_id=?", (new_quantity, order_id))
+                self.conn.commit()
+
+                print(f"Removed {amount} from quantity of order_id {order_id}. New quantity: {new_quantity}")
+            else:
+                print(f"Cannot remove {amount} from order_id {order_id}. Insufficient quantity.")
+
+        else:
+            print(f"No order found with order_id {order_id}")
+
+    except sqlite3.Error as e:
+        print(f"An error occurred while removing quantity from limit order: {e}")
+
+
+async def update_limit_order(self, ctx, order_id, new_quantity):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM limit_orders
+            WHERE order_id = ?
+        """, (order_id,))
+
+        existing_order = cursor.fetchone()
+
+        if existing_order:
+            # Calculate the remaining quantity
+            remaining_quantity = max(existing_order['quantity'] - new_quantity, 0)
+
+            # Update the order with the new quantity
+            cursor.execute("""
+                UPDATE limit_orders
+                SET quantity = ?
+                WHERE order_id = ?
+            """, (remaining_quantity, order_id))
+
+            self.conn.commit()
+
+#            embed = discord.Embed(description="Limit order updated successfully.")
+#            embed.add_field(name="Order ID:", value=f"{order_id}", inline=False)
+#            embed.add_field(name="Remaining Quantity:", value=f"{remaining_quantity:,.2f}", inline=False)
+#            await ctx.send(embed=embed)
+        else:
+            #await ctx.send(f"No limit order found with order_id {order_id}.")
+            pass
+    except sqlite3.Error as e:
+        await ctx.send(f"An error occurred while updating the limit order: {e}")
+
+
+async def read_limit_orders(self, ctx):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM limit_orders")
+        rows = cursor.fetchall()
+
+        if not rows:
+            embed = discord.Embed(description="No limit orders found.")
+            await ctx.send(embed=embed)
+        else:
+            for row in rows:
+                order_info = {
+                    'order_id': row['order_id'],
+                    'user_id': row['user_id'],
+                    'symbol': row['symbol'],
+                    'order_type': row['order_type'],
+                    'price': row['price'],
+                    'quantity': row['quantity'],
+                    'created_at': row['created_at']
+                }
+
+                print(order_info)
+                embed = discord.Embed(title="Limit Order Information", description=str(order_info))
+                await ctx.send(embed=embed)
+    except sqlite3.Error as e:
+        embed = discord.Embed(description=f"An error occurred while reading limit orders: {e}")
+        await ctx.send(embed=embed)
+
+async def orders_at_price(self, ctx, order_type, symbol):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM limit_orders
+            WHERE order_type = ? AND symbol = ?
+            ORDER BY price ASC, created_at ASC
+        """, (order_type, symbol))
+
+        rows = cursor.fetchall()
+
+        if rows:
+            orders_info = [{
+                'order_id': row['order_id'],
+                'user_id': row['user_id'],
+                'symbol': row['symbol'],
+                'order_type': row['order_type'],
+                'price': row['price'],
+                'quantity': row['quantity'],
+                'created_at': row['created_at']
+            } for row in rows]
+
+            return orders_info
+        else:
+            return []
+    except sqlite3.Error as e:
+        print(f"An error occurred while fetching orders at a specific price: {e}")
+        return []
+
+async def lowest_price_order(self, ctx, order_type, symbol, skip_user_id: bool = False):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM limit_orders
+            WHERE order_type = ? AND symbol = ?
+            ORDER BY price ASC
+            LIMIT 1
+        """, (order_type, symbol))
+
+        row = cursor.fetchone()
+
+        if row:
+            order_info = {
+                'order_id': row['order_id'],
+                'user_id': row['user_id'],
+                'symbol': row['symbol'],
+                'order_type': row['order_type'],
+                'price': row['price'],
+                'quantity': row['quantity'],
+                'created_at': row['created_at']
+            }
+
+            return order_info
+        else:
+            return False
+    except sqlite3.Error as e:
+        print(f"An error occurred while fetching the lowest price order: {e}")
+
+
+
+async def highest_price_order(self, ctx, order_type, symbol):
+    try:
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT * FROM limit_orders
+            WHERE order_type = ? AND symbol = ?
+            ORDER BY price DESC
+            LIMIT 1
+        """, (order_type, symbol))
+
+        row = cursor.fetchone()
+
+        if row:
+            order_info = {
+                'order_id': row['order_id'],
+                'user_id': row['user_id'],
+                'symbol': row['symbol'],
+                'order_type': row['order_type'],
+                'price': row['price'],
+                'quantity': row['quantity'],
+                'created_at': row['created_at']
+            }
+
+            return order_info
+        else:
+            return False
+    except sqlite3.Error as e:
+        print(f"An error occurred while fetching the lowest price order: {e}")
+
+
+
+
+async def calculate_min_price(self, ctx, stock_name: str):
+    try:
+        async with aiosqlite.connect("currency_system.db") as conn:
+            await wait_for_unlocked(conn)
+            cursor = await conn.cursor()
+
+            # Fetch stock information
+            await cursor.execute("SELECT * FROM stocks WHERE symbol=?", (stock_name,))
+            stock = await cursor.fetchone()
+
+            if stock is None:
+                return 0  # or handle the case where the stock doesn't exist
+
+            available_supply = Decimal(stock[3])
+
+            # Fetch circulating supply
+            await cursor.execute("SELECT SUM(amount) FROM user_stocks WHERE symbol = ?", (stock_name,))
+            circulating_supply = await cursor.fetchone()
+            circulating_supply = Decimal(circulating_supply[0]) if circulating_supply else 0
+
+            current_price = await get_stock_price(self, ctx, stock_name)
+
+            # You can adjust this formula based on your specific requirements
+            circulating_supply = float(circulating_supply)
+            available_supply = float(available_supply)
+            current_price = float(current_price)
+
+            # Calculate the minimum price using your formula
+            min_price = baseMinPrice + (circulating_supply / available_supply) * current_price
+
+            # Ensure that the minimum price is strictly less than or equal to the current price
+            min_price = max(min_price, 0)
+
+            return min_price
+
+    except aiosqlite.Error as e:
+        print(f"An error occurred: {str(e)}")
+
+async def calculate_max_price(self, ctx, stock_symbol):
+    try:
+        async with aiosqlite.connect("currency_system.db") as conn:
+            await wait_for_unlocked(conn)
+            cursor = await conn.cursor()
+
+            # Get the current price of the stock
+            await cursor.execute("SELECT price FROM stocks WHERE symbol=?", (stock_symbol,))
+            current_price = await get_stock_price(self, ctx, stock_symbol)  # Convert to Decimal
+
+            max_price_adjustment_factor = Decimal("0.1") * Decimal(current_price)
+
+            # Fetch stock information
+            await cursor.execute("SELECT * FROM stocks WHERE symbol=?", (stock_symbol,))
+            stock = await cursor.fetchone()
+
+            if stock is None:
+                return current_price  # or handle the case where the stock doesn't exist
+
+            available_supply = Decimal(stock[3])
+
+            # Fetch circulating supply
+            await cursor.execute("SELECT SUM(amount) FROM user_stocks WHERE symbol = ?", (stock_symbol,))
+            circulating_supply = await cursor.fetchone()
+            circulating_supply = Decimal(circulating_supply[0]) if circulating_supply else 0
+
+            # Calculate the daily volume for the stock
+            total_buy_volume, total_sell_volume, total_volume = await calculate_volume(stock_symbol, interval='daily')
+
+            if total_sell_volume is None:
+                total_sell_volume = 1e-10
+            if total_buy_volume is None:
+                total_buy_volume = 1e-10
+
+            # Calculate the ratio of total sell volume to total buy volume
+            sell_buy_ratio = total_sell_volume / max(total_buy_volume, 1e-10)  # Adding a small value to avoid division by zero
+
+            # Define the scaling factor function
+            def calculate_scaling_factor(ratio):
+                # You can customize this function based on how much you want total_sell_volume to affect the dynamic cap
+                return 1 + (ratio * 0.5)
+
+            # Calculate the scaling factor based on the sell-buy ratio
+            scaling_factor = calculate_scaling_factor(sell_buy_ratio)
+
+            min_cap = Decimal("0.0755")
+            max_cap = 2.0
+            current_price = Decimal(current_price)
+
+            daily_volume = total_volume
+
+            # Calculate the dynamic adjustment based on the daily volume
+            volume_adjustment_factor = Decimal("0.0001") * Decimal(daily_volume)
+
+            # Adjust the max_percentage_cap based on total_sell_volume
+            dynamic_cap = min(max_cap, max(min_cap, max_cap - scaling_factor))
+
+            # Calculate the new maximum price
+            max_price = (current_price / circulating_supply) * max_price_adjustment_factor * volume_adjustment_factor
+
+            # Ensure that the max_price is always higher than current_price
+            max_price = max(max_price, current_price)
+
+            # Ensure that max_price is not more than 25% over current_price when they are closer
+            max_price = min(max_price, current_price * Decimal("1.357"))
+
+            # Ensure that max_price is not equal to current_price
+            if max_price == current_price:
+                price_difference = Decimal(current_price) * Decimal("0.07523")  # Minimum of 10%
+
+                # Introduce a random factor with a range of 0% to 15%
+                random_factor = Decimal(str(random.uniform(0, 0.25532)))
+
+                # Adjust the maximum change based on the current price
+                max_change_percentage = min(Decimal(dynamic_cap), current_price / Decimal("100"))
+
+                # Calculate the maximum change within the allowed percentage
+                max_change = Decimal(random.uniform(0, float(max_change_percentage)))
+
+                # Use the higher of the two random factors
+                max_price_change = max(random_factor, max_change)
+
+                max_price += max(price_difference, Decimal(current_price) * max_price_change)
+                max_price = min(max_price, Decimal(20000000))  # Ensure it doesn't exceed 20,000,000
+
+
+            return max_price
+
+    except aiosqlite.Error as e:
+        print(f"An error occurred: {str(e)}")
+
+
+
+async def convert_to_float(value):
+    # Helper function to convert a value to float, handling None and string conversion
+    return float(value.replace(',', '')) if value is not None and isinstance(value, str) else 0.0
+
+async def get_stock_price_interval(self, ctx, stock_symbol, interval='daily'):
+    try:
+        async with aiosqlite.connect("p3ledger.db") as conn:
+            cursor = await conn.cursor()
+
+            # Get the current date and time in EST timezone
+            est_tz = pytz.timezone('America/New_York')
+            now = datetime.now(est_tz)
+
+            # Set the start and end times for the day in EST timezone
+            start_of_day = now.replace(hour=7, minute=0, second=0, microsecond=0)
+            end_of_day = now.replace(hour=19, minute=0, second=0, microsecond=0)
+
+            # Adjust the current date if necessary
+            if now < start_of_day:
+                today = now.date() - timedelta(days=1)
+            else:
+                today = now.date()
+
+            # Calculate the start timestamp based on the specified interval
+            if interval == 'daily':
+                start_timestamp = start_of_day
+            elif interval == 'weekly':
+                start_timestamp = today - timedelta(days=today.weekday())
+            elif interval == 'monthly':
+                start_timestamp = today.replace(day=1)
+            else:
+                raise ValueError("Invalid interval. Supported intervals: 'daily', 'weekly', 'monthly'")
+
+            # Fetch the opening price and the current price for the specified stock within the specified interval
+            query = """
+                SELECT
+                    COALESCE((SELECT price FROM stock_transactions WHERE symbol=? AND timestamp >= ? AND timestamp <= ? AND action='Buy Stock' ORDER BY timestamp ASC LIMIT 1), 0.0) as opening_price,
+                    COALESCE((SELECT price FROM stock_transactions WHERE symbol=? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1), 0.0) as current_price
+            """
+            await cursor.execute(query, (stock_symbol, start_timestamp, end_of_day, stock_symbol, start_timestamp, end_of_day))
+            result = await cursor.fetchone()
+
+            opening_price, current_price = await asyncio.gather(
+                convert_to_float(result[0]),
+                convert_to_float(result[1])
+            )
+
+            price_change = current_price - opening_price
+
+            return opening_price, current_price, price_change
+
+    except aiosqlite.Error as e:
+        print(f"An error occurred: {str(e)}")
+        return 0, 0, 0
+
+
+async def get_stock_price_change(self, ctx, stock_symbol, interval='daily'):
+    try:
+        async with aiosqlite.connect("p3ledger.db") as conn:
+            cursor = await conn.cursor()
+
+            # Get the current date and time in EST timezone
+            est_tz = pytz.timezone('America/New_York')
+            now = datetime.now(est_tz)
+
+            # Adjust the current time to account for the timestamp discrepancy
+            now = now - timedelta(hours=4)  # Subtract 4 hours to align with the ledger's timestamp
+
+            # Set the start and end times for the day and after hours in EST timezone
+            start_of_day = now.replace(hour=7, minute=0, second=0, microsecond=0)
+            end_of_day = now.replace(hour=19, minute=0, second=0, microsecond=0)
+            start_after_hours = now.replace(hour=19, minute=0, second=0, microsecond=0) - timedelta(days=1)
+            end_after_hours = now.replace(hour=7, minute=0, second=0, microsecond=0)
+
+            # Adjust the current date if necessary
+            if now < start_of_day:
+                today = now.date() - timedelta(days=1)
+            else:
+                today = now.date()
+
+            # Calculate the start timestamp based on the specified interval
+            if interval == 'daily':
+                start_timestamp = start_of_day
+                end_timestamp = now
+                prev_start_timestamp = start_after_hours
+                prev_end_timestamp = end_of_day
+            elif interval == 'weekly':
+                start_timestamp = today - timedelta(days=today.weekday())
+                end_timestamp = now
+                prev_start_timestamp = start_timestamp - timedelta(days=7)
+                prev_end_timestamp = start_timestamp
+            elif interval == 'monthly':
+                start_timestamp = today.replace(day=1)
+                end_timestamp = now
+                prev_start_timestamp = start_timestamp - relativedelta(months=1)
+                prev_end_timestamp = start_timestamp
+            else:
+                raise ValueError("Invalid interval. Supported intervals: 'daily', 'weekly', 'monthly'")
+
+            # Fetch the opening price and the current price for the specified stock within the specified interval
+            query = """
+                SELECT
+                    COALESCE((SELECT price FROM stock_transactions WHERE symbol=? AND timestamp >= ? AND timestamp <= ? AND action='Buy Stock' ORDER BY timestamp ASC LIMIT 1), 0.0) as opening_price,
+                    COALESCE((SELECT price FROM stock_transactions WHERE symbol=? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 1), 0.0) as current_price,
+                    COALESCE((SELECT price FROM stock_transactions WHERE symbol=? AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC LIMIT 1), 0.0) as prev_opening_price
+            """
+            await cursor.execute(query, (stock_symbol, start_timestamp, end_timestamp, stock_symbol, start_timestamp, end_timestamp, stock_symbol, prev_start_timestamp, prev_end_timestamp))
+            result = await cursor.fetchone()
+
+            opening_price, current_price, prev_opening_price = await asyncio.gather(
+                convert_to_float(result[0]),
+                convert_to_float(result[1]),
+                convert_to_float(result[2])
+            )
+
+            current_price = await get_stock_price(self, ctx, stock_symbol)
+            if opening_price == 0:
+                opening_price = current_price
+            if prev_opening_price == 0:
+                prev_opening_price = current_price
+            price_change = current_price - opening_price
+            prev_price_change = current_price - prev_opening_price
+
+            # Protect against division by zero
+            percentage_change = (price_change / opening_price) * 100 if opening_price != 0 else 0
+            prev_percentage_change = (prev_price_change / prev_opening_price) * 100 if prev_opening_price != 0 else 0
+
+            return opening_price, current_price, price_change, percentage_change, prev_price_change, prev_percentage_change
+
+    except aiosqlite.Error as e:
+        print(f"An error occurred: {str(e)}")
+        return 0, 0, 0, 0, 0, 0
+
+
+async def count_active_users(self, interval='daily'):
+    try:
+        # Connect to the ledger database
+        async with aiosqlite.connect("p3ledger.db") as conn:
+            cursor = await conn.cursor()
+
+            # Get the current date and time in EST timezone
+            est_tz = pytz.timezone('America/New_York')
+            now = datetime.now(est_tz)
+
+            # Adjust the current time to account for the timestamp discrepancy
+            now = now - timedelta(hours=4)  # Subtract 4 hours to align with the ledger's timestamp
+
+            # Set the start and end times based on the specified interval
+            if interval == 'daily':
+                start_time = now.replace(hour=7, minute=0, second=0, microsecond=0)
+                end_time = now.replace(hour=19, minute=0, second=0, microsecond=0)
+            elif interval == 'weekly':
+                start_time = now - timedelta(days=now.weekday())
+                start_time = start_time.replace(hour=7, minute=0, second=0, microsecond=0)
+                end_time = start_time + timedelta(days=7)
+            elif interval == 'monthly':
+                start_time = now.replace(day=1, hour=7, minute=0, second=0, microsecond=0)
+                end_time = start_time + relativedelta(months=1)
+            else:
+                raise ValueError("Invalid interval. Supported intervals: 'daily', 'weekly', 'monthly'")
+
+            # Query to count the number of distinct users who made transactions within the specified interval
+            query = """
+                SELECT COUNT(DISTINCT user_id)
+                FROM stock_transactions
+                WHERE timestamp >= ? AND timestamp <= ? AND (action = 'Buy Stock' OR action = 'Sell Stock')
+            """
+            await cursor.execute(query, (start_time, end_time))
+            result = await cursor.fetchone()
+
+            return result[0] if result else 0
+
+    except aiosqlite.Error as e:
+        print(f"An error occurred: {str(e)}")
+        return 0
+
+
+
+async def get_total_shares_for_user(self, ctx, symbol):
+    try:
+        async with aiosqlite.connect("currency_system.db") as conn:
+            cursor = await conn.cursor()
+
+            if symbol:
+                # Fetch orders placed by the user
+                await cursor.execute("""
+                    SELECT * FROM limit_orders
+                    WHERE user_id = ? and symbol = ?
+                    """, (ctx.author.id, symbol,))
+                user_orders = await cursor.fetchall()
+
+                # Calculate total number of shares
+                total_shares = sum(order['quantity'] for order in user_orders)
+                return total_shares
+
+    except aiosqlite.Error as e:
+        print(f"An error occurred: {str(e)}")
+        return 0  # Return 0 if an error occurs
+
+async def get_daily_volume(self, symbol):
+    try:
+        async with aiosqlite.connect("p3ledger.db") as conn:
+            cursor = await conn.cursor()
+
+            # Get the current date
+            today = datetime.now().date()
+
+            # Calculate the start timestamp for the day
+            start_timestamp = today.replace(hour=0, minute=0, second=0, microsecond=0)
+
+            # Fetch the daily volume for the specified stock symbol
+            query = """
+                SELECT COALESCE(SUM(quantity), 0)
+                FROM stock_transactions
+                WHERE symbol=? AND action='Buy Stock' AND timestamp >= ? AND timestamp < ?
+            """
+            await cursor.execute(query, (symbol, start_timestamp, start_timestamp + timedelta(days=1)))
+            result = await cursor.fetchone()
+
+            daily_volume = await convert_to_float(result[0])
+
+            return daily_volume
+    except aiosqlite.Error as e:
+        print(f"An error occurred: {str(e)}")
+
+async def plot_daily_volume_chart(self, ctx):
+    try:
+        async with aiosqlite.connect("p3ledger.db") as conn:
+            cursor = await conn.cursor()
+
+            # Get all unique symbols
+            cursor.execute("SELECT DISTINCT symbol FROM stock_transactions")
+            symbols = [row[0] for row in cursor.fetchall()]
+
+            # Get the first purchase date for each symbol
+            first_purchase_dates = {}
+            for symbol in symbols:
+                query = "SELECT MIN(timestamp) FROM stock_transactions WHERE symbol=?"
+                cursor.execute(query, (symbol,))
+                result = cursor.fetchone()
+                first_purchase_dates[symbol] = datetime.strptime(result[0], "%Y-%m-%d %H:%M:%S").date()
+
+            # Initialize data for plotting
+            dates = []
+            volumes = {symbol: [] for symbol in symbols}
+
+            # Fetch daily volumes for each symbol
+            current_date = datetime.now().date()
+            while current_date >= min(first_purchase_dates.values()):
+                dates.append(current_date)
+                for symbol in symbols:
+                    start_timestamp = current_date.replace(hour=0, minute=0, second=0, microsecond=0)
+                    end_timestamp = start_timestamp + timedelta(days=1)
+
+                    query = """
+                        SELECT COALESCE(SUM(quantity), 0)
+                        FROM stock_transactions
+                        WHERE symbol=? AND action='Buy Stock' AND timestamp >= ? AND timestamp < ?
+                    """
+                    cursor.execute(query, (symbol, start_timestamp, end_timestamp))
+                    result = cursor.fetchone()
+                    daily_volume = await convert_to_float(result[0])
+                    volumes[symbol].append(daily_volume)
+
+                current_date -= timedelta(days=1)
+
+            # Plot the chart
+            plt.figure(figsize=(10, 6))
+            for symbol in symbols:
+                plt.plot(dates, volumes[symbol], label=symbol)
+
+            plt.xlabel('Date')
+            plt.ylabel('Daily Volume')
+            plt.title('Daily Volume Chart for Each Symbol')
+            plt.legend()
+
+            # Save the plot as an image
+            image_stream = BytesIO()
+            plt.savefig(image_stream, format='png')
+            image_stream.seek(0)
+            plt.close()
+
+            # Send the image as a file in Discord
+            await ctx.send(file=File(image_stream, filename='daily_volume_chart.png'))
+
+    except aiosqlite.Error as e:
+        print(f"An error occurred: {str(e)}")
+
+async def get_average_quantity_held(self, ctx, user_id, symbol):
+    conn = sqlite3.connect("p3ledger.db", check_same_thread=False, isolation_level=None)
+    cursor = conn.cursor()
+
+    # Calculate average quantity held for "Buy Stock" action
+    cursor.execute("""
+        SELECT AVG(quantity) as avg_quantity_held
+        FROM stock_transactions
+        WHERE user_id = ? AND symbol = ? AND action = 'Buy Stock'
+    """, (user_id, symbol))
+    avg_quantity_held_buy = cursor.fetchone()[0] or 0.0
+
+    # Calculate average quantity held for "Sell Stock" action
+    cursor.execute("""
+        SELECT AVG(quantity) as avg_quantity_held
+        FROM stock_transactions
+        WHERE user_id = ? AND symbol = ? AND action = 'Sell Stock'
+    """, (user_id, symbol))
+    avg_quantity_held_sell = cursor.fetchone()[0] or 0.0
+
+    # Combine the averages
+    combined_avg_quantity_held = (avg_quantity_held_buy + avg_quantity_held_sell) / 2
+
+
+    return avg_quantity_held_buy, avg_quantity_held_sell, combined_avg_quantity_held
+
+
+async def get_stock_profit_loss(self, ctx, user_id, symbol):
+    # Get average prices and quantity held
+    avg_buy, avg_sell, total_avg = await get_average_stock_prices(self, ctx, user_id, symbol)
+    avg_quantity_held_buy, avg_quantity_held_sell, avg_quantity_held = await get_average_quantity_held(self, ctx, user_id, symbol)
+
+    # Calculate overall P/L
+    if avg_buy <= 0 or avg_quantity_held <= 0:
+        return 0  # No profit/loss if no purchases or holdings
+    overall_pl = (avg_sell - avg_buy) * avg_quantity_held
+
+    return overall_pl
+
+
+async def get_average_stock_prices(self, ctx, user_id, symbol):
+    conn = sqlite3.connect("p3ledger.db", check_same_thread=False, isolation_level=None)
+    cursor = conn.cursor()
+
+    # Calculate average buy price
+    cursor.execute("""
+        SELECT AVG(CAST(REPLACE(price, ',', '') AS REAL)) as avg_buy_price
+        FROM stock_transactions
+        WHERE user_id = ? AND symbol = ? AND action = 'Buy Stock'
+    """, (user_id, symbol))
+    avg_buy_price = cursor.fetchone()[0] or 0.0
+
+    # Calculate average sell price
+    cursor.execute("""
+        SELECT AVG(CAST(REPLACE(price, ',', '') AS REAL)) as avg_sell_price
+        FROM stock_transactions
+        WHERE user_id = ? AND symbol = ? AND action = 'Sell Stock'
+    """, (user_id, symbol))
+    avg_sell_price = cursor.fetchone()[0] or 0.0
+
+    # Calculate total average price
+    cursor.execute("""
+        SELECT AVG(CAST(REPLACE(price, ',', '') AS REAL)) as total_avg_price
+        FROM stock_transactions
+        WHERE user_id = ? AND symbol = ?
+    """, (user_id, symbol))
+    total_avg_price = cursor.fetchone()[0] or 0.0
+
+
+
+    return avg_buy_price, avg_sell_price, total_avg_price
+
+async def send_claim_message(self, ctx, amount, stake_rewards, resource, derivatives, total_yield, new_balance):
+    # Define the width of the ASCII-like window
+    window_width = 10
+    user_addr = get_p3_address(self.P3addrConn, ctx.author.id)
+
+    # Clear the console for a clean display (optional)
+#    print('\033c', end='')
+
+    # Construct the formatted message with ASCII-like layout
+    message = f"""\
++{'-' * (window_width - 2)}+
+|{'Claim Summary':^{window_width - 2}}|
++{'-' * (window_width - 2)}+
+| {user_addr},{' ' * (window_width - len(ctx.author.mention) - 3)} |
+|{' ' * (window_width - 3)}|
+| You have claimed {amount:,.0f} $QSE{' ' * (window_width - 21 - len(str(amount)))} |
+| Claimed {stake_rewards:,.0f} $QSE from staking rewards{' ' * (window_width - 41 - len(str(stake_rewards)))} |
+| Claimed {resource:,.0f} Gold from Penthouses{' ' * (window_width - 36 - len(str(resource)))} |
+| Claimed {derivatives:,.0f} shares of DiamondCoin @ 2.33% APY{' ' * (window_width - 50 - len(str(derivatives)))} |
+| Claimed {total_yield:,.0f} shares from Derivatives @ 2.33% APY{' ' * (window_width - 50 - len(str(total_yield)))} |
+| Awarded 10 XP{' ' * (window_width - 18)} |
+| Your new balance is: {new_balance:,.0f} $QSE{' ' * (window_width - 28 - len(str(new_balance)))} |
++{'-' * (window_width - 2)}+
+"""
+
+    # Send the formatted message to the Discord channel
+    await ctx.send(f"```{message}```")
+
+async def get_average_etf_prices(self, ctx, user_id, symbol):
+    conn = sqlite3.connect("p3ledger.db", check_same_thread=False, isolation_level=None)
+    cursor = conn.cursor()
+
+    # Calculate average buy price
+    cursor.execute("""
+        SELECT AVG(CAST(REPLACE(price, ',', '') AS REAL)) as avg_buy_price
+        FROM stock_transactions
+        WHERE user_id = ? AND symbol = ? AND action = 'Buy ETF'
+    """, (user_id, symbol))
+    avg_buy_price = cursor.fetchone()[0] or 0.0
+
+    # Calculate average sell price
+    cursor.execute("""
+        SELECT AVG(CAST(REPLACE(price, ',', '') AS REAL)) as avg_sell_price
+        FROM stock_transactions
+        WHERE user_id = ? AND symbol = ? AND action = 'Sell ETF'
+    """, (user_id, symbol))
+    avg_sell_price = cursor.fetchone()[0] or 0.0
+
+    # Calculate total average price
+    cursor.execute("""
+        SELECT AVG(CAST(REPLACE(price, ',', '') AS REAL)) as total_avg_price
+        FROM stock_transactions
+        WHERE user_id = ? AND symbol = ?
+    """, (user_id, symbol))
+    total_avg_price = cursor.fetchone()[0] or 0.0
+
+
+
+    return avg_buy_price, avg_sell_price, total_avg_price
+
+
+async def wait_for_unlocked(conn: aiosqlite.Connection):
+    while True:
+        try:
+            # Try executing a simple query to check if the database is locked
+            async with conn.execute("SELECT 1") as cursor:
+                await cursor.fetchall()
+            # If the query succeeds, the database is not locked
+            break
+        except aiosqlite.DatabaseLockedError:
+            # Database is locked, wait for a short duration and try again
+            await asyncio.sleep(0.1)
+        except aiosqlite.OperationalError as e:
+            # Some other operational error occurred, raise it
+            raise e
+
+
+async def count_all_transactions(interval='daily'):
+    try:
+        # Create a connection to the SQLite database
+        conn = sqlite3.connect("p3ledger.db")
+        cursor = conn.cursor()
+
+        # Get the current date
+        today = datetime.now().date()
+
+        # Calculate the start and end timestamps based on the specified interval
+        if interval == 'daily':
+            start_timestamp = today.strftime("%Y-%m-%d 00:00:00")
+        elif interval == 'weekly':
+            # Calculate the start of the week (Monday)
+            start_of_week = today - timedelta(days=today.weekday())
+            start_timestamp = start_of_week.strftime("%Y-%m-%d 00:00:00")
+        elif interval == 'monthly':
+            # Calculate the start of the month
+            start_of_month = today.replace(day=1)
+            start_timestamp = start_of_month.strftime("%Y-%m-%d 00:00:00")
+        else:
+            raise ValueError("Invalid interval. Supported intervals: 'daily', 'weekly', 'monthly'")
+
+        # Count the number of buy and sell transactions for all stocks within the specified interval
+        cursor.execute("""
+            SELECT
+                COUNT(CASE WHEN action = 'Buy Stock' THEN 1 END) AS buy_count,
+                COUNT(CASE WHEN action = 'Sell Stock' THEN 1 END) AS sell_count
+            FROM stock_transactions
+            WHERE timestamp >= ?
+        """, (start_timestamp,))
+
+        buy_count, sell_count = cursor.fetchone()
+
+        return buy_count, sell_count
+
+    except sqlite3.Error as e:
+        print(f"An error occurred: {str(e)}")
+
+    finally:
+        # Close the database connection
+        conn.close()
+
+
+async def count_transactions(stock_name, interval='daily'):
+    try:
+        # Create a connection to the SQLite database
+        conn = sqlite3.connect("p3ledger.db")
+        cursor = conn.cursor()
+
+        # Get the current date
+        today = datetime.now().date()
+
+        # Calculate the start and end timestamps based on the specified interval
+        if interval == 'daily':
+            start_timestamp = today.strftime("%Y-%m-%d 00:00:00")
+            end_timestamp = today.strftime("%Y-%m-%d 23:59:59")
+        elif interval == 'weekly':
+            # Calculate the start of the week (Monday)
+            start_of_week = today - timedelta(days=today.weekday())
+            start_timestamp = start_of_week.strftime("%Y-%m-%d 00:00:00")
+            end_timestamp = today.strftime("%Y-%m-%d 23:59:59")
+        elif interval == 'monthly':
+            # Calculate the start of the month
+            start_of_month = today.replace(day=1)
+            start_timestamp = start_of_month.strftime("%Y-%m-%d 00:00:00")
+            end_timestamp = today.strftime("%Y-%m-%d 23:59:59")
+        else:
+            raise ValueError("Invalid interval. Supported intervals: 'daily', 'weekly', 'monthly'")
+
+        # Count buy transactions
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM stock_transactions
+            WHERE symbol=? AND timestamp BETWEEN ? AND ? AND action='Buy Stock'
+        """, (stock_name, start_timestamp, end_timestamp))
+        buy_count = cursor.fetchone()[0]
+
+        # Count sell transactions
+        cursor.execute("""
+            SELECT COUNT(*)
+            FROM stock_transactions
+            WHERE symbol=? AND timestamp BETWEEN ? AND ? AND action='Sell Stock'
+        """, (stock_name, start_timestamp, end_timestamp))
+        sell_count = cursor.fetchone()[0]
+
+        return buy_count, sell_count
+
+    except sqlite3.Error as e:
+        print(f"An error occurred: {str(e)}")
+
+    finally:
+        # Close the database connection
+        conn.close()
+async def calculate_volume(stock_symbol, interval='daily'):
+    try:
+        async with aiosqlite.connect("p3ledger.db") as conn:
+            await wait_for_unlocked(conn)
+            cursor = await conn.cursor()
+
+            # Get the current date and time
+            now = datetime.now()
+
+            # Calculate the start timestamp based on the specified interval
+            if interval == 'daily':
+                start_timestamp = now - timedelta(days=1)
+            elif interval == 'weekly':
+                start_timestamp = now - timedelta(days=now.weekday(), hours=now.hour, minutes=now.minute, seconds=now.second)
+            elif interval == 'monthly':
+                start_timestamp = datetime(now.year, now.month, 1)
+            else:
+                raise ValueError("Invalid interval. Supported intervals: 'daily', 'weekly', 'monthly'")
+
+            # Fetch total buy, total sell, and total volume for the specified stock within the specified interval
+            await cursor.execute("""
+                SELECT
+                    COALESCE(SUM(CASE WHEN action='Buy Stock' THEN quantity ELSE 0 END), 0.00000000000001) AS total_buy_volume,
+                    COALESCE(SUM(CASE WHEN action='Sell Stock' THEN quantity ELSE 0 END), 0.00000000000001) AS total_sell_volume,
+                    COALESCE(SUM(quantity), 0.00000000000001) AS total_volume
+                FROM stock_transactions
+                WHERE symbol=? AND (action='Buy Stock' OR action='Sell Stock') AND timestamp BETWEEN ? AND ?
+            """, (stock_symbol, start_timestamp, now))
+
+            total_buy_volume, total_sell_volume, total_volume = await cursor.fetchone()
+
+            return total_buy_volume, total_sell_volume, total_volume
+
+    except aiosqlite.Error as e:
+        print(f"An error occurred: {str(e)}")
+
+
+
+async def update_user_balance(conn, user_id, new_balance):
+    try:
+        if not isinstance(user_id, int) or new_balance is None:
+            raise ValueError(f"Invalid user_id or new_balance value. user_id: {user_id}, new_balance: {new_balance:,.2f}")
+        cursor = conn.cursor()
+        # Ensure that new_balance is a Decimal
+        new_balance = Decimal(new_balance)
+
+
+        # Use a single SQL statement for both table creation and insertion
+        cursor.execute("""
+            INSERT OR REPLACE INTO users (user_id, balance)
+            VALUES (?, ?)
+        """, (user_id, new_balance))
+
+        conn.commit()
+    except ValueError as e:
+        print(f"Error in update_user_balance: {e}")
+        raise e
+
+
+
+
+
+def update_user_stocks(user_id, stocks_reward_symbol, stocks_reward_amount, transaction_type):
+    try:
+        # Using context manager for database connection
+        with sqlite3.connect("currency_system.db") as conn:
+            cursor = conn.cursor()
+
+            if transaction_type.lower() not in {"buy", "sell"}:
+                raise ValueError("Invalid transaction type. Please use 'buy' or 'sell'.")
+
+            # Use a single SQL statement with a parameterized query to handle both buy and sell cases
+            cursor.execute(f"""
+                UPDATE stocks
+                SET available = available {'-' if transaction_type.lower() == 'buy' else '+'} ?
+                WHERE symbol = ?
+            """, (stocks_reward_amount, stocks_reward_symbol))
+
+            # Insert or update user_stocks table
+            cursor.execute("""
+                INSERT INTO user_stocks (user_id, symbol, amount)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, symbol)
+                DO UPDATE SET amount = amount + ?""",
+                (user_id, stocks_reward_symbol, stocks_reward_amount, stocks_reward_amount))
+
+            # Commit the changes to the database
+            conn.commit()
+
+    except sqlite3.Error as e:
+        print(f"Error updating user stocks: {e}")
+
+    except ValueError as ve:
+        print(f"ValueError: {ve}")
+
+    except Exception as ex:
+        print(f"An unexpected error occurred: {ex}")
+
+async def update_available_stock(ctx, stock_name, amount, transaction_type):
+    try:
+        # Using context manager for database connection
+        with sqlite3.connect("currency_system.db") as conn:
+            cursor = conn.cursor()
+
+            conn.execute("BEGIN")
+
+            if transaction_type.lower() == "buy":
+                # Check if available stock will go below zero
+                cursor.execute("SELECT available FROM stocks WHERE symbol=?", (stock_name,))
+                available_stock = cursor.fetchone()[0]
+                if available_stock < amount:
+                    await ctx.send(f"{ctx.author.mention}, insufficient available stock for {stock_name}.")
+                    return
+
+                cursor.execute("""
+                    UPDATE stocks
+                    SET available = available - ?
+                    WHERE symbol = ?
+                """, (amount, stock_name))
+            elif transaction_type.lower() == "sell":
+                cursor.execute("""
+                    UPDATE stocks
+                    SET available = available + ?
+                    WHERE symbol = ?
+                """, (amount, stock_name))
+            else:
+                await ctx.send(f"{ctx.author.mention}, invalid transaction type. Please use 'buy' or 'sell'.")
+                return
+
+            conn.commit()
+
+    except sqlite3.Error as e:
+        await ctx.send(f"{ctx.author.mention}, an error occurred while updating available stocks. Error: {str(e)}")
+        return
+
+
+
+async def check_store_addr(self, ctx):
+    target_address = get_p3_address(self.P3addrConn, ctx.author.id)
+    # Get user_id associated with the target address
+    user_id = get_user_id(self.P3addrConn, target_address)
+
+    if not user_id:
+        await ctx.send("P3 Address not found, type !store_addr to get one.")
+        return user_id
+
+    else:
+        return target_address
+
+
+def calculate_interest(self, amount, interest_rate, elapsed_days):
+    # Assuming simple interest for the sake of simplicity
+    weekly_interest = (interest_rate / 100) * amount
+    total_interest = weekly_interest * (elapsed_days // 7)
+    return total_interest
+
+def get_interest_rate(self, lock_duration):
+    # Map lock durations to corresponding interest rates
+    interest_rates = {30: 10, 60: 13, 90: 16, 120: 22}
+    return interest_rates.get(lock_duration, 0)
+
+def get_user_balance(conn, user_id):
+    cursor = conn.cursor()
+    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+
+    if row is None:
+        return Decimal(0)
+
+    balance = row[0]
+
+    # If balance is already a float or int
+    if isinstance(balance, (float, int)):
+        return Decimal(balance)
+
+    # If balance is a serialized string (JSON or otherwise)
+    try:
+        stripped_balance = balance.strip('"').replace(",", "").rstrip("0").rstrip(".")
+        return Decimal(stripped_balance)
+    except (ValueError, decimal.InvalidOperation):
+        pass
+
+    # If balance is in some other unexpected format, handle it here or raise an error
+    raise ValueError("Invalid balance format in the database.")
+
+
+def has_role(user, role_id):
+    """Check if the user has a specific role."""
+    return any(role.id == role_id for role in user.roles)
+
+
+def get_tax_percentage(quantity: int, cost: Decimal) -> float:
+    base_tax = 0.025
+    random_factor = random.uniform(0.01115, 0.03654)  # Randomly fluctuate tax by 1-5%
+
+    # Time-based variability
+    current_month = datetime.now().month
+    if current_month in [8, 11, 12]:  # For November and December, assume a tax discount for holidays
+        seasonal_discount = -0.05
+    else:
+        seasonal_discount = 0
+
+    # Check if today is Monday
+    if datetime.now().weekday() == 0:  # Monday is 0, Tuesday is 1, etc.
+        max_tax_rate = 0.15  # Set maximum tax to 10% on Mondays
+    else:
+        # Formulaic approach for max_tax_rate based on logarithmic progression
+        max_tax_rate = 0.25 / (1 + math.exp(float(cost) / -500000000))
+
+    # Formulaic approach (based on logarithmic progression)
+    quantity_multiplier = 0.001 * (quantity ** 0.5)
+    cost_multiplier = 0.001 * (float(cost) / 1000) ** 0.5
+
+    tax_rate = base_tax + quantity_multiplier + cost_multiplier + random_factor + seasonal_discount
+
+    # Limit the tax rate to the maximum tax on Mondays
+    tax_rate = min(tax_rate, max_tax_rate)
+
+    # Clipping the tax_rate between 0.01 (1%) to 0.5 (50%) to ensure it's not too low or too high
+    tax_rate = max(0.01, min(tax_rate, 0.5))
+
+    return tax_rate
+
+
+async def get_supply_stats(self, ctx, symbol):
+    reserve = self.get_user_stock_amount(PBot, symbol)
+    total, locked = await get_supply_info(self, ctx, symbol)
+    escrow = await get_total_shares_in_orders(self, symbol)
+    market = abs(reserve - escrow)
+    circulating = await self.get_circulating_supply(ctx, symbol)
+    total = abs(market + locked + escrow + circulating)
+
+
+    return reserve, total, locked, escrow, market, circulating
+
+
+
+
+
+async def get_supply_info(self, ctx, stock_name):
+    cursor = self.conn.cursor()
+
+    # Retrieve current supply amounts
+    cursor.execute("SELECT total_supply, available FROM stocks WHERE symbol=?", (stock_name,))
+    supply_info = cursor.fetchone()
+
+    if supply_info is None:
+#        await ctx.send(f"This stock does not exist.")
+        return
+
+    return supply_info
+
+
+# End Economy Engine

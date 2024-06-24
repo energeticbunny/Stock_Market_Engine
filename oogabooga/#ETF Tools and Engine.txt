@@ -1,0 +1,649 @@
+#ETF Tools and Engine
+
+    @commands.command(name="create_etf", help="Create a new ETF.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def create_etf(self, ctx, name: str, description: str = ""):
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.execute("INSERT INTO etfs (name, description) VALUES (?, ?)", (name, description))
+            self.conn.commit()
+            await ctx.send(f"ETF '{name}' created successfully!")
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while creating the ETF: {str(e)}")
+
+    @commands.command(name="add_etf", help="Add a stock to an ETF.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def add_etf(self, ctx, etf_id: int, symbol: str, quantity: int):
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.execute("INSERT INTO etf_stocks (etf_id, symbol, quantity) VALUES (?, ?, ?)", (etf_id, symbol, quantity))
+            self.conn.commit()
+            await ctx.send(f"Stock '{symbol}' added to ETF {etf_id} successfully!")
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while adding the stock to the ETF: {str(e)}")
+
+    @commands.command(name="list_etfs", aliases=["etfs", "etps", "list_etps"], help="List all ETFs and their values.")
+    async def list_etfs(self, ctx):
+        self.tax_command_timer_start = timeit.default_timer()
+        async with self.db_semaphore:
+            async with self.transaction_lock:
+                mv = await get_etf_value(self, ctx, 6)
+                await add_mv_metric(self, ctx, mv)
+                await add_etf_metric(self, ctx)
+#        await add_metal_metric(self, ctx)
+                await add_reserve_metric(self, ctx)
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT etf_id, name FROM etfs")
+                etfs = cursor.fetchall()
+
+                if not etfs:
+                    await ctx.send("No ETPs found.")
+                    return
+
+                embed = discord.Embed(title="Exchange Traded Products", description="List of all ETPs and their values:", color=discord.Color.blue())
+                etf_value = 0
+                for etf in etfs:
+                    etf_id = etf[0]
+                    etf_name = etf[1]
+                    etf_price = await get_etf_value(self, ctx, etf_id)
+                    etf_total = await get_total_etf_shares(self, etf_id)
+                    etf_avbl = await get_available_etf_shares(self, etf_id)
+                    etf_value += etf_price
+                    if etf_id == 1 or etf_id == 13 or etf_id == 14 or etf_id == 4 or etf_id == 15:
+                        embed.add_field(name=f"Index ID: {etf_id}", value=f"Name: {etf_name}\nValue: {etf_price:,.2f} $QSE\nAvailable: {etf_avbl:,.0f}({((etf_avbl / etf_total) * 100):,.4f}%)\nTotal: {etf_total:,.0f}\nCirculating: {(etf_total - etf_avbl):,.0f}({(((etf_total - etf_avbl) / etf_total) * 100):,.4f}%)", inline=False)
+                    else:
+                        embed.add_field(name=f"Index ID: {etf_id}", value=f"Name: {etf_name}\nValue: {etf_price:,.2f} $QSE", inline=False)
+
+
+                await ctx.message.delete()
+                await ctx.send(embed=embed)
+                await tax_command(self, ctx)
+                elapsed_time = timeit.default_timer() - self.tax_command_timer_start
+                self.tax_command_avg.append(elapsed_time)
+                avg_time = sum(self.tax_command_avg) / len(self.tax_command_avg)
+
+
+    @commands.command(name="my_etfs", aliases=["my_etps"], help="Show the ETFs owned by the user and their quantities.")
+    async def my_etfs(self, ctx):
+        self.tax_command_timer_start = timeit.default_timer()
+        async with self.db_semaphore:
+            async with self.transaction_lock:
+                user_id = ctx.author.id
+                cursor = self.conn.cursor()
+
+                await ctx.message.delete()
+                cursor.execute("SELECT etf_id, quantity FROM user_etfs WHERE user_id=?", (user_id,))
+                user_etfs = cursor.fetchall()
+
+                if not user_etfs:
+                    await ctx.send("You don't own any ETPs.")
+                    return
+
+                total_value = 0
+                embed = discord.Embed(title="My ETPs", description="List of ETPs owned by you:", color=discord.Color.blue())
+
+                for etf in user_etfs:
+                    etf_id = etf[0]
+                    quantity = etf[1]
+
+                    cursor.execute("SELECT name FROM etfs WHERE etf_id=?", (etf_id,))
+                    etf_name = cursor.fetchone()[0]
+
+                    etf_value = await get_etf_value(self, ctx, etf_id)
+                    avg_buy, avg_sell, avg_total = await get_average_etf_prices(self, ctx, user_id , etf_id)
+
+                    total_value += (etf_value or 0) * quantity
+                    if quantity != 0.0:
+                        embed.add_field(name=f"ETF ID: {etf_id}", value=f"Name: {etf_name}\nQuantity: {quantity:,}\nCurrent ETF value: {etf_value:,.2f}\nValue: {(etf_value or 0) * quantity:,.2f} $QSE\nAvg Buy: {avg_buy:,.2f} $QSE\nAvg Sell: {avg_sell:,.2f} $QSE", inline=False)
+
+                embed.set_footer(text=f"Total Value: {total_value:,.2f} $QSE")
+                await ctx.send(embed=embed)
+                await tax_command(self, ctx)
+                elapsed_time = timeit.default_timer() - self.tax_command_timer_start
+                self.tax_command_avg.append(elapsed_time)
+                avg_time = sum(self.tax_command_avg) / len(self.tax_command_avg)
+
+
+    @commands.command(name="return_etfs_to_market", help="Return all ETFs from a user to the market.")
+    async def return_etfs_to_market(self, ctx, user_id: int):
+        try:
+            cursor = self.conn.cursor()
+
+            # Fetch the ETFs held by the user
+            cursor.execute("SELECT etf_id, quantity FROM user_etfs WHERE user_id=?", (user_id,))
+            user_etfs = cursor.fetchall()
+
+            if user_etfs:
+                for etf_id, quantity in user_etfs:
+                    # Update available shares for the ETF
+                    cursor.execute("UPDATE etf_shares SET available = available + ? WHERE etf_id=?", (quantity, etf_id))
+
+                # Delete the user's ETF holdings
+                cursor.execute("DELETE FROM user_etfs WHERE user_id=?", (user_id,))
+                self.conn.commit()
+
+                await ctx.send(f"All ETFs held by user with ID {user_id} have been returned to the market.")
+            else:
+                await ctx.send(f"No ETFs found for user with ID {user_id}.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred: {str(e)}")
+
+
+    @commands.command(name="remove_etf_from_user", help="Remove an ETF from a specified user's holdings.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def remove_etf_from_user(self, ctx, user_id: int, etf_id: int):
+        cursor = self.conn.cursor()
+
+        try:
+            # Remove the ETF from user's holdings
+            cursor.execute("DELETE FROM user_etfs WHERE user_id=? AND etf_id=?", (user_id, etf_id))
+            self.conn.commit()
+
+            # Retrieve the number of shares removed
+            cursor.execute("SELECT quantity FROM user_etfs WHERE user_id=? AND etf_id=?", (user_id, etf_id))
+            removed_shares = cursor.fetchone()[0]
+
+            # Update the available shares for the ETF
+            available_shares = await self.get_available_etf_shares(etf_id)
+            if available_shares is not None:
+                await self.update_etf_shares(etf_id, available_shares + removed_shares)
+                await ctx.send(f"ETF with ID {etf_id} has been removed from user with ID {user_id}'s holdings. {removed_shares} shares added back to the market.")
+            else:
+                await ctx.send(f"Failed to update available shares for ETF with ID {etf_id}.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while removing the ETF from user's holdings: {str(e)}")
+
+
+    @commands.command(name="remove_all_orders", help="Remove all orders from all users.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def remove_all_orders(self, ctx):
+        cursor = self.conn.cursor()
+
+        try:
+            # Remove all orders from all users
+            cursor.execute("DELETE FROM limit_orders")
+            self.conn.commit()
+
+            await ctx.send("All orders from all users have been removed.")
+
+        except sqlite3.Error as e:
+                await ctx.send(f"An error occurred while removing orders: {str(e)}")
+
+
+    @commands.command(name="remove_all_etfs_from_users", help="Remove all ETFs from all users' holdings.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def remove_all_etfs_from_users(self, ctx):
+        cursor = self.conn.cursor()
+
+        try:
+            # Remove all ETFs from all users' holdings
+            cursor.execute("DELETE FROM user_etfs")
+            self.conn.commit()
+
+            await ctx.send("All ETFs have been removed from all users' holdings.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while removing the ETFs from users' holdings: {str(e)}")
+
+
+    @commands.command(name="remove_stock_from_user", help="Remove a stock from a specified user's holdings.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def remove_stock_from_user(self, ctx, user_id: int, stock_symbol: str):
+        cursor = self.conn.cursor()
+        p3Addr = get_p3_address(self.P3addrConn, user_id)
+
+        try:
+            # Remove the stock from user's holdings
+            cursor.execute("DELETE FROM user_stocks WHERE user_id=? AND symbol=?", (user_id, stock_symbol))
+            self.conn.commit()
+
+            await ctx.send(f"Stock with symbol {stock_symbol} has been removed from user with ID {p3Addr}'s holdings.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while removing the stock from user's holdings: {str(e)}")
+
+
+    @commands.command(name="transfer_stocks", help="Transfer stocks from one user to another.")
+    @is_allowed_user(930513222820331590, "PBot")  # Update with the correct PBot ID
+    async def transfer_stocks(self, ctx, p3addr):
+        cursor = self.conn.cursor()
+        from_user_id = get_user_id(self.P3addrConn, p3addr)
+        to_user_id = PBot
+
+
+        try:
+            # Fetch stocks from the source user's holdings
+            cursor.execute("SELECT symbol FROM user_stocks WHERE user_id=?", (from_user_id,))
+            stocks = cursor.fetchall()
+
+            if stocks:
+                # Remove stocks from the source user's holdings
+                cursor.execute("DELETE FROM user_stocks WHERE user_id=?", (from_user_id,))
+                self.conn.commit()
+
+                # Transfer the stocks to the target user
+                for stock in stocks:
+                    symbol = stock[0]
+                    cursor.execute("INSERT INTO user_stocks (user_id, symbol) VALUES (?, ?)", (to_user_id, symbol))
+                self.conn.commit()
+
+                await ctx.send(f"Stocks have been transferred from user with ID {from_user_id} to user with ID {to_user_id}.")
+            else:
+                await ctx.send(f"User with ID {from_user_id} does not have any stocks to transfer.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while transferring stocks: {str(e)}")
+
+
+    @commands.command(name='set_all_balances')
+    @is_allowed_user(930513222820331590, PBot)
+    async def set_all_balances(self, ctx):
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("UPDATE users SET balance = ?;", (80000000000000000,))
+            self.conn.commit()
+            cursor.close()
+            await ctx.send("All user balances set to 100,000,000.")
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while updating user balances: {e}")
+
+    @commands.command(name="remove_user_stock")
+    @is_allowed_user(930513222820331590, PBot)
+    async def remove_user_stock(self, ctx):
+        cursor = self.conn.cursor()
+
+        # Execute the SQL command to set stock amount to 0 for all users
+        try:
+            cursor.execute("UPDATE user_stocks SET amount = 0")
+            self.conn.commit()
+            await ctx.send("Stock amounts set to 0 for all users.")
+        except sqlite3.Error as e:
+            print(f"An error occurred while updating user stocks: {e}")
+
+
+    @commands.command(name="remove_chart_data")
+    @is_allowed_user(930513222820331590, PBot)
+    async def remove_chart_data(self, ctx):
+        cursor = self.conn.cursor()
+        etf_charts = ["1", "2", "3", "4", "7", "8", "9", "10", "11", "13"]
+        try:
+            cursor.execute("SELECT symbol, available, total_supply, price FROM stocks")
+            stocks = cursor.fetchall()
+            await ctx.send("Clearing ETF chart data")
+            for i in etf_charts:
+                cursor.execute(f"DELETE FROM etf_{i}_value")
+            await ctx.send("Removing Market chart data")
+            cursor.execute(f"DELETE FROM market_value")
+            await ctx.send("Removing Reserve chart data")
+            cursor.execute(f"DELETE FROM reserve_value")
+            self.conn.commit()
+
+            await ctx.send(f"ETF, Market, and Reserve chart blocks removed successful")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred: {str(e)}")
+
+
+
+    async def get_etf_info(self, ctx, etf_id):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT s.symbol, s.price, s.available
+            FROM stocks AS s
+            INNER JOIN etf_stocks AS e ON s.symbol = e.symbol
+            WHERE e.etf_id = ?
+        """, (etf_id,))
+        stock_data = cursor.fetchall()
+
+        if not stock_data:
+            return None
+
+        stocks_info = []
+        for stock in stock_data:
+
+            result = await lowest_price_order(self, ctx, "sell", stock[0])
+            lowest_sell_price = result["price"] if result else None
+            escrow_supply = await get_total_shares_in_orders(self, stock[0])
+            reserve_supply = self.get_user_stock_amount(PBot, stock[0])
+            reserve_supply = reserve_supply - escrow_supply
+            result = await get_supply_stats(self, ctx, stock[0])
+            reserve, total, locked, escrow, market, circulating = result
+            current_price = await get_stock_price(self, ctx, stock[0])
+            stocks_info.append({
+                'symbol': stock[0],
+                'price': current_price,
+                'available': market,
+                'lowest_sell_price': lowest_sell_price,
+                'total_shares_in_escrow': escrow
+            })
+
+        return stocks_info
+
+
+    @commands.command(name="update_all_balances", help="Update everyone's balance to $1,000,000.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def update_all_balances(self, ctx):
+        cursor = self.conn.cursor()
+
+        try:
+            # Update the balance of all users to $1,000,000
+            cursor.execute("UPDATE users SET balance = 1000000")
+            self.conn.commit()
+            await ctx.send("All users' balances have been updated to $1,000,000.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while updating balances: {str(e)}")
+
+
+    @commands.command(name='etf_shares')
+    async def show_etf_shares(self, ctx, etf_id):
+#        etf_shares = await get_etf_shares(self, ctx, etf_id)
+        etf_shares = await get_total_etf_shares(self, etf_id)
+        etf_avbl = await get_available_etf_shares(self, etf_id)
+        etf_value = await get_etf_value(self, ctx, etf_id)
+
+        await ctx.send(f"ETF Metric {etf_id}\n\nAvailable: {etf_avbl:,.0f}\nTotal: {etf_shares:,.0f}\nCurrent ETF Value: {etf_value:,.2f} QSE\n\nTotal ETF Value: {(etf_shares * etf_value):,.2f} QSE")
+#        await insert_etf_shares(self, etf_id, etf_shares, etf_shares)
+
+    @commands.command(name="etf_info", aliases=["etp_info"], help="Display information about a specific ETF.")
+    async def etf_info(self, ctx, etf_id: int):
+        stocks_info = await self.get_etf_info(ctx, etf_id)
+
+        if not stocks_info:
+            await ctx.send(f"No stocks found for ETF ID: {etf_id}.")
+            return
+
+        etf_price = sum(stock['price'] for stock in stocks_info)
+
+        chunk_size = 10
+        stock_chunks = list(chunk_list(stocks_info, chunk_size))
+
+        etf_shares = await get_etf_shares(self, ctx, etf_id)
+        embeds = []
+        for i, stock_chunk in enumerate(stock_chunks, start=1):
+            embed = discord.Embed(title=f"ETP Information (Index ID: {etf_id})", color=discord.Color.blue())
+            embed.add_field(name="Asset", value="Price ($QSE)\nAvailable Supply\nTotal Shares in Escrow\nOrder Price", inline=False)
+            for stock in stock_chunk:
+                symbol = stock['symbol']
+                price = stock['price']
+                available = stock['available']
+                total_shares_in_escrow = stock['total_shares_in_escrow']
+                lowest_sell_price = stock['lowest_sell_price']
+
+
+                embed.add_field(name=symbol, value=f"{price:,.2f} $QSE\n{int(available):,.0f} shares\n{total_shares_in_escrow:,.0f} shares\n{lowest_sell_price:,.2f} $QSE" if lowest_sell_price else f"{price:,.2f} $QSE\n{int(available):,.0f} shares\n{total_shares_in_escrow:,.0f} shares\n", inline=False)
+
+            if len(stock_chunks) > 1:
+                embed.set_footer(text=f"Page {i}/{len(stock_chunks)}")
+            embeds.append(embed)
+
+        total_etf_value = etf_price
+        embeds[-1].add_field(name="Total ETP Value", value=f"${total_etf_value:,.2f}", inline=False)
+
+        message = await ctx.send(embed=embeds[0])
+        if len(embeds) > 1:
+            current_page = 0
+            await message.add_reaction("◀️")
+            await message.add_reaction("▶️")
+
+            def check(reaction, user):
+                return user == ctx.author and str(reaction.emoji) in ["◀️", "▶️"]
+
+            while True:
+                try:
+                    reaction, user = await self.bot.wait_for("reaction_add", timeout=60.0, check=check)
+                except asyncio.TimeoutError:
+                    await ctx.send("Pagination timeout.")
+                    break
+
+                if str(reaction.emoji) == "▶️" and current_page < len(embeds) - 1:
+                    current_page += 1
+                elif str(reaction.emoji) == "◀️" and current_page > 0:
+                    current_page -= 1
+
+                await message.edit(embed=embeds[current_page])
+
+                try:
+                    await message.remove_reaction(reaction, user)
+                except discord.errors.NotFound:
+                    pass
+
+                try:
+                    await ctx.message.delete()
+                except discord.errors.NotFound:
+                    pass
+
+        await message.clear_reactions()
+
+
+    async def send_percentage_change_embed(self, ctx, interval, percentage_change):
+        # Create an embed for the percentage change message
+        embed = discord.Embed(
+            title=f"{interval} Percentage Change",
+            description=f"{percentage_change:,.2f}%",
+            color=discord.Color.green()
+        )
+
+        # Send the embed message to the channel
+        await ctx.send(embed=embed)
+
+    def is_market_open(self):
+        # Get the current date and time in EST timezone
+        est_tz = pytz.timezone('America/New_York')
+        now = datetime.now(est_tz)
+
+        # Check if the current time is between 7 AM and 7 PM EST
+        market_open = now.hour >= 7 and now.hour < 19
+        return market_open
+
+
+    @commands.command(name="tax_channels")
+    async def tax_channel(self, ctx):
+        while True:
+            await update_city_config(self, ctx)
+            city_channel_1_id = 1227270089477460039
+            city_channel_2_id = 1227270117197348934
+            city_channel_3_id = 1227270135795024032
+            city_channel_4_id =  1227270162609078273
+            city_channel_1 = self.bot.get_channel(city_channel_1_id)
+            city_channel_2 = self.bot.get_channel(city_channel_2_id)
+            city_channel_3 = self.bot.get_channel(city_channel_3_id)
+            city_channel_4 = self.bot.get_channel(city_channel_4_id)
+            q_tax = await get_city_tax(self, ctx, "Quantumopolis") * 100
+            s_tax = await get_city_tax(self, ctx, "StellarHub") * 100
+            c_tax = await get_city_tax(self, ctx, "CryptoVista") * 100
+            t_tax = await get_city_tax(self, ctx, "TechnoMetra") * 100
+            await city_channel_1.edit(name=f'Quantumopolis: {q_tax:,.2f}%')
+            await city_channel_2.edit(name=f'StellarHub: {s_tax:,.2f}%')
+            await city_channel_3.edit(name=f'CryptoVista: {c_tax:,.2f}%')
+            await city_channel_4.edit(name=f'TechnoMetra: {t_tax:,.2f}%')
+            await asyncio.sleep(300)
+
+    @commands.command(name="market_polling", help="Update the name of the ETF 6 voice channel with its value.")
+    async def update_etf_value(self, ctx):
+
+        while True:
+
+            locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
+            mv = await get_etf_value(self, ctx, 6)
+            await add_mv_metric(self, ctx, mv)
+            await add_etf_metric(self, ctx)
+            await add_reserve_metric(self, ctx)
+            mv_avg = await calculate_average_mv(self)
+            dispatch_blacklist = self.bot.dispatch("Blacklist sent to main node", self.blacklisted)
+            if dispatch_blacklist:
+                print("Blacklist dispatched to main node")
+                print(f"\n\n\nMV Avg: {mv_avg:,.2f}\nCMV: {mv:,.2f}\n\n\n")
+
+            market_channel_id = 1218250701579358208  # Replace with your voice channel ID
+
+
+        # Check if the market is open or closed based on the current time in EST
+            market_open = self.is_market_open()
+
+            # Fetch the voice channel
+            market_channel = self.bot.get_channel(market_channel_id)
+            if market_channel:
+            # Set the appropriate emoji based on market status
+                emoji = '🟢' if market_open else '🔴'
+                status = 'Market Open' if market_open else 'Market Closed'
+                if self.is_halted:
+                    emoji = '🟡'
+                    status = 'Market Halted'
+
+
+                # Update the voice channel name with the market status and emoji
+                await market_channel.edit(name=f'{status}: {emoji}')
+
+
+            users_channel_id = 1224398017462014033
+
+            # Fetch the active user count using the count_active_users function
+            active_users_count = await count_active_users(self)
+
+            # Fetch the voice channel
+            users_channel = self.bot.get_channel(users_channel_id)
+            if users_channel:
+                # Update the voice channel name with the active user count
+                await users_channel.edit(name=f'Active Users: {active_users_count}')
+
+            etf_6_value = await get_etf_value(self, ctx, 6)
+            etf_6_value_formatted = locale.format_string("%0.2f", etf_6_value, grouping=True)
+
+            voice_channel_id = 1161706930981589094  # Replace with the actual ID
+            voice_channel = ctx.guild.get_channel(voice_channel_id)
+            gas_channel_id = 1182436005530320917
+            gas_channel = ctx.guild.get_channel(gas_channel_id)
+
+            if gas_channel:
+                current_name = gas_channel.name
+                old_gas_fee_match = re.search(r"Gas: ([0-9,.]+)%", current_name)
+
+                if old_gas_fee_match:
+                    old_gas_fee = float(old_gas_fee_match.group(1))
+                else:
+                    old_gas_fee = 0.0
+
+                new_gas_fee = self.calculate_tax_percentage(ctx, "sell_etf") * 100
+                percentage_change = new_gas_fee - old_gas_fee
+
+                if new_gas_fee > old_gas_fee:
+                    direction_arrow = "↗"
+                elif new_gas_fee < old_gas_fee:
+                    direction_arrow = "↘"
+                else:
+                    if abs(new_gas_fee - old_gas_fee) < 0.01:
+                        direction_arrow = "→"
+
+                if new_gas_fee >= 15:
+                    color = f"🔴 {direction_arrow}"
+                elif new_gas_fee >= 10:
+                    color = f"🟡 {direction_arrow}"
+                else:
+                    color = f"🟢 {direction_arrow}"
+
+                new_name = f"Gas: {new_gas_fee:,.2f}% {color} {percentage_change:+,.2f}%"
+                await gas_channel.edit(name=new_name)
+
+
+            if voice_channel:
+                old_name = voice_channel.name
+                old_price_match = re.search(r"MV: ([\d,]+\.\d+)", old_name)
+
+                if old_price_match:
+                    old_price_str = old_price_match.group(1).replace(",", "")
+                    try:
+                        old_price = float(old_price_str)
+                    except ValueError:
+                        old_price = None
+                else:
+                    old_price = None
+
+                if old_price is not None:
+                    percentage_change = ((etf_6_value - old_price) / old_price) * 100
+                    embed = discord.Embed(
+                        title="Market Value Update",
+                        color=discord.Color.green()
+                    )
+                    embed.add_field(
+                        name="Old Price",
+                        value=f"${old_price:,.2f}",
+                        inline=True
+                    )
+                    embed.add_field(
+                        name="New Price",
+                        value=f"${etf_6_value:,.2f}",
+                        inline=True
+                    )
+                    embed.add_field(
+                        name="Percentage Change",
+                        value=f"{percentage_change:,.2f}%",
+                        inline=False
+                    )
+                    embed.add_field(
+                        name="Gas Fee",
+                        value=f"{new_gas_fee}% {direction_arrow}",
+                        inline=False
+                    )
+                    color = f"🟡 →" if abs(percentage_change) < 0.00000000000000001 else f"📈 ↗" if percentage_change > 0 else f"📉 ↘"
+                    new_name = f"MV: {etf_6_value_formatted} {color}"
+                    await voice_channel.edit(name=new_name)
+                    await ctx.send(embed=embed)
+                else:
+                    await ctx.send("Failed to retrieve the old price from the channel name.")
+            else:
+                await ctx.send(f"Voice channel with ID '{voice_channel_id}' not found.")
+
+
+
+            self.run_counter += 1
+            gas = self.calculate_tax_percentage(ctx, "sell_etf") * 100
+            print(f"Gas Debug: {gas}%\nCounter: {self.run_counter}\nMarket: {etf_6_value_formatted}({percentage_change:,.5f}%)\nTrading Halted: {self.is_halted}\nHalted Stocks: {self.not_trading}\nStocks in maintenance: {self.maintenance}\nStocks in IPO: {self.ipo_stocks}")
+
+            if self.run_counter == 2016:
+                self.buy_stock_avg = [1]
+                self.sell_stock_avg = [1]
+                self.buy_etf_avg = [1]
+                self.sell_etf_avg = [1]
+                self.casino_avg = [1]
+                self.run_counter = 0
+            await asyncio.sleep(300)
+
+
+    @commands.command(name="update_etf_prices", help="Update prices of stocks in an ETF by a specified percentage.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def update_etf_prices(self, ctx, etf_id: int, percentage: float):
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT symbol, price FROM stocks WHERE symbol IN (
+                SELECT symbol FROM etf_stocks WHERE etf_id = ?
+            )
+        """, (etf_id,))
+        stocks = cursor.fetchall()
+
+        if not stocks:
+            await ctx.send("The specified ETF does not exist or has no stocks.")
+            return
+
+        for stock in stocks:
+            symbol = stock[0]
+            price = stock[1]
+
+            # Calculate the new price based on the percentage
+            new_price = price * (1 + (percentage / 100))
+
+            try:
+                cursor.execute("""
+                    UPDATE stocks
+                    SET price = ?
+                    WHERE symbol = ?
+                """, (new_price, symbol))
+            except sqlite3.Error as e:
+                await ctx.send(f"An error occurred while updating the prices. Error: {str(e)}")
+                return
+
+        self.conn.commit()

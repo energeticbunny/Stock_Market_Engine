@@ -1,0 +1,47 @@
+## Market Place Tools
+
+    @commands.command(name="adjust_price", help="Adjust the price of an item.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def adjust_price(self, ctx, item_name: str, new_price: float):
+        cursor = self.conn.cursor()
+
+        # Check if the item exists
+        cursor.execute("SELECT item_id, price FROM items WHERE item_name=?", (item_name,))
+        item = cursor.fetchone()
+
+        if not item:
+            await ctx.send(f"The item '{item_name}' does not exist.")
+            return
+
+        item_id, old_price = item
+
+        # Update the item's price
+        cursor.execute("UPDATE items SET price=? WHERE item_id=?", (new_price, item_id))
+        self.conn.commit()
+
+        await ctx.send(f"The price of the item '{item_name}' has been adjusted from {old_price:,.2f} to {new_price:,.2f}.")
+
+
+    @commands.command(name="add_item", help="Add an item to the marketplace.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def add_item(self, ctx, item_name: str, price: float, item_description: str = "", is_usable: bool = False):
+        conn = sqlite3.connect("currency_system.db")
+        cursor = conn.cursor()
+
+        try:
+            # Insert the new item into the 'items' table
+            cursor.execute("""
+                INSERT INTO items (item_name, item_description, price, is_usable)
+                VALUES (?, ?, ?, ?)
+            """, (item_name, item_description, price, int(is_usable)))
+
+            conn.commit()
+
+            await ctx.send(f"The item '{item_name}' has been added to the marketplace.")
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while adding the item: {e}")
+        finally:
+            conn.close()
+
+
+## End Marketplace

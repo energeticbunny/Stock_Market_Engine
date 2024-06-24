@@ -1,0 +1,842 @@
+##
+
+
+
+
+    @commands.command(name='buy_option')
+    @is_allowed_user(930513222820331590, PBot)
+    async def buy_option(self, ctx, asset, quantity=1):
+        updown_assets = ["BlueChipOG"]
+        updown_assets.extend(self.etfs)
+
+        if asset not in updown_assets:
+            await ctx.send(f"UpDown Options not available for {asset}")
+            return
+
+        user_id = ctx.author.id
+
+        P3addrConn = sqlite3.connect("P3addr.db")
+        PBotAddr = get_p3_address(P3addrConn, PBot)
+
+        if asset in self.etfs:
+            current_price = await get_etf_value(self, ctx, int(asset))
+            exp_day = 1
+        else:
+            current_price = await get_stock_price(self, ctx, asset)
+            exp_day = 1
+            self.UpDownPer = self.UpDownPer * 2
+
+        lower_limit, upper_limit = calculate_option_range(self, current_price)
+        contract_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        expiration = (datetime.now() + timedelta(days=exp_day)).strftime("%Y-%m-%d %H:%M:%S")
+        current_balance = get_user_balance(self.conn, user_id)
+
+        order_amount = current_price * quantity
+        if order_amount > current_balance:
+            await ctx.send(f"Current Balance: {current_balance:,.2f} is less than order amount {order_amount:,.2f}")
+            return
+        await self.give_addr(ctx, PBotAddr, int(order_amount), False)
+
+        success = await add_updown_order(self, user_id, asset, current_price, quantity, lower_limit, upper_limit, contract_date, expiration)
+
+        if success:
+            potential_payout = (upper_limit - lower_limit) * self.UpDownPer / 100 * quantity
+
+            if asset in self.etfs:
+                tail = f"ETF {asset}"
+            else:
+                tail = asset
+
+            embed = discord.Embed(
+                title=f"UpDown Option Contract purchase for {tail}",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Contracts Purchased:", value=f"{quantity:,.0f}\n\n", inline=False)
+            embed.add_field(name="Current Price:", value=f"{current_price:,.2f}", inline=False)
+            embed.add_field(name="Lower Limit:", value=f"{lower_limit:,.2f}", inline=False)
+            embed.add_field(name="Upper Limit:", value=f"{upper_limit:,.2f}", inline=False)
+            embed.add_field(name="Contract:", value=f"{contract_date}", inline=False)
+            embed.add_field(name="Expiration:", value=f"{expiration}", inline=False)
+            embed.add_field(name="Potential Payout:", value=f"Contract Price: {current_price:,.2f}\n\nOrder Price: {order_amount:,.2f}\n\nPayout Price: {potential_payout:,.2f}\n\nTotal Winnings: {(order_amount + potential_payout):,.2f}", inline=False)
+
+            await ctx.send(embed=embed)
+        else:
+            await ctx.send("Failed to add UpDown option contracts. Please try again.")
+
+
+
+    @commands.command(name='show_options')
+    async def show_options(self, ctx):
+        user_id = ctx.author.id
+        expiration_status = check_expiration_status(self, user_id)
+
+        if expiration_status:
+            await ctx.send("You don't have any active option contracts.")
+            return
+
+        user_options = await get_user_options(self, user_id)
+
+        if user_options:
+            asset_data = {}  # Dictionary to store compiled data for each asset
+
+            for index, user_option in enumerate(user_options, start=1):
+                buy_price = user_option["current_price"]
+                asset = user_option["asset"]
+                if asset in self.etfs:
+                    current_price = await get_etf_value(self, ctx, asset)
+                else:
+                    current_price = await get_stock_price(self, ctx, asset)
+#                    self.UpDownPer = self.UpDownPer * 2
+
+                # Calculate the potential payout based on the percentage range and payout percentage
+                lower_limit = user_option["lower_limit"]
+                upper_limit = user_option["upper_limit"]
+                potential_payout = (upper_limit - lower_limit) * self.UpDownPer / 100
+                payout = buy_price + potential_payout
+
+                # Compile data for each asset
+                if asset not in asset_data:
+                    asset_data[asset] = {
+                        'total_contracts': 1,
+                        'total_value': buy_price,
+                        'total_reward': payout
+                    }
+                else:
+                    asset_data[asset]['total_contracts'] += 1
+                    asset_data[asset]['total_value'] += buy_price
+                    asset_data[asset]['total_reward'] += payout
+
+            # Send compiled data for each asset
+            for asset, data in asset_data.items():
+                embed = discord.Embed(
+                    title=f"UpDown Option Contract Details - {asset}",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Total Contracts", value=str(data['total_contracts']), inline=False)
+                embed.add_field(name="Total Value", value=f"{data['total_value']:,.2f} $QSE", inline=False)
+                embed.add_field(name="Total Reward", value=f"{data['total_reward']:,.2f} $QSE", inline=False)
+
+                await ctx.send(embed=embed)
+
+        else:
+            await ctx.send("You don't have any active option contracts.")
+
+
+
+    @commands.command(name='updown')
+    async def updown(self, ctx, asset):
+        if asset in self.etfs:
+            current_price = await get_etf_value(self, ctx, int(asset))
+        else:
+            current_price = await get_stock_price(self, ctx, asset)
+#            self.UpDownPer = self.UpDownPer * 2
+
+        lower_limit, upper_limit = calculate_option_range(self, current_price)
+
+
+        # Calculate the potential payout based on the percentage range and payout percentage
+        potential_payout = (upper_limit - lower_limit) * self.UpDownPer / 100
+
+        embed = discord.Embed(
+            title=f"UpDown Option Contract",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Current Price:", value=f"{current_price:,.2f}", inline=False)
+        embed.add_field(name="Lower Limit:", value=f"{lower_limit:,.2f}", inline=False)
+        embed.add_field(name="Upper Limit:", value=f"{upper_limit:,.2f}", inline=False)
+        embed.add_field(name="Potential Payout:", value=f"Contract Price: {current_price:,.2f}\n\nPayout Price: {potential_payout:,.2f}\n\nTotal Winnings: {(current_price + potential_payout):,.2f}", inline=False)
+
+        await ctx.send(embed=embed)
+
+
+
+    @commands.command(name='stats', aliases=['portfolio'], help='Displays the user\'s financial stats.')
+    async def stats(self, ctx, address: str = None):
+        self.tax_command_timer_start = timeit.default_timer()
+        a = True
+        b = True
+        if a:
+#        async with self.db_semaphore:
+            if b:
+#            async with self.transaction_lock:
+                mv = await get_etf_value(self, ctx, 6)
+                await add_mv_metric(self, ctx, mv)
+                await add_etf_metric(self, ctx)
+#        await add_metal_metric(self, ctx)
+                await add_reserve_metric(self, ctx)
+                if address is None:
+                    user_id = ctx.author.id
+                    P3Addr = generate_crypto_address(user_id)
+                else:
+                    P3Addr = address
+                    user_id = get_user_id(self.P3addrConn, address)
+
+                try:
+                    # Connect to databases using context managers
+                    with sqlite3.connect('currency_system.db') as conn, sqlite3.connect("p3ledger.db") as ledger_conn:
+                        cursor = conn.cursor()
+                        ledger_cursor = ledger_conn.cursor()
+
+                        try:
+                            # Get user balance
+                            current_balance = cursor.execute("SELECT COALESCE(balance, 0) FROM users WHERE user_id=?", (user_id,)).fetchone()[0]
+                        except Exception as e:
+                            current_balance = 0
+
+                        try:
+                            # Calculate total stock value
+                            user_stocks = cursor.execute("SELECT symbol, amount FROM user_stocks WHERE user_id=?", (user_id,)).fetchall()
+
+                            total_stock_value = 0
+
+                            for symbol, amount in user_stocks:
+                                current_price = await get_stock_price(self, ctx, symbol)
+                                total_stock_value += current_price * amount
+                        except Exception as e:
+                            total_stock_value = 0
+
+
+                        try:
+                            # Calculate total ETF value
+                            user_etfs = cursor.execute("SELECT etf_id, quantity FROM user_etfs WHERE user_id=?", (user_id,)).fetchall()
+
+                            total_etf_value = 0
+
+                            for etf_id, quantity in user_etfs:
+                                # Fetch current ETF value
+                                current_etf_value = await get_etf_value(self, ctx, etf_id)
+
+                                # Accumulate total ETF value
+                                total_etf_value += current_etf_value * quantity
+                        except Exception as e:
+                            total_etf_value = 0
+
+
+                        try:
+                            # Calculate total buys, sells, and profits/losses from p3ledger for stocks within the current month
+                            current_month_start = datetime.datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                            stock_transactions_data = ledger_cursor.execute("""
+                                SELECT action, SUM(quantity), SUM(price)
+                                FROM stock_transactions
+                                WHERE user_id=? AND (action='Buy Stock' OR action='Sell Stock') AND timestamp >= ?
+                                GROUP BY action
+                            """, (user_id, current_month_start)).fetchall()
+
+                            # Adding default values for cases where data is not available
+                            total_stock_buys = sum(total_price for action, quantity, total_price in stock_transactions_data if "Buy" in action) or 0
+                            total_stock_sells = sum(total_price for action, quantity, total_price in stock_transactions_data if "Sell" in action) or 0
+                            total_stock_profits_losses = total_stock_sells - total_stock_buys
+                        except Exception as e:
+                            total_stock_buys = total_stock_sells = total_stock_profits_losses = 0
+
+                        try:
+                            # Calculate total buys, sells, and profits/losses from p3ledger for ETFs within the current month
+                            etf_transactions_data = ledger_cursor.execute("""
+                                SELECT action, SUM(quantity), SUM(price)
+                                FROM stock_transactions
+                                WHERE user_id=? AND (action='Buy ETF' OR action='Sell ETF') AND timestamp >= ?
+                                GROUP BY action
+                            """, (user_id, current_month_start)).fetchall()
+
+                            # Adding default values for cases where data is not available
+                            total_etf_buys = sum(total_price for action, quantity, total_price in etf_transactions_data if "Buy" in action) or 0
+                            total_etf_sells = sum(total_price for action, quantity, total_price in etf_transactions_data if "Sell" in action) or 0
+                            total_etf_profits_losses = total_etf_sells - total_etf_buys
+                        except Exception as e:
+                            total_etf_buys = total_etf_sells = total_etf_profits_losses = 0
+
+                        try:
+                            # Calculate the total value of metals in the user's inventory
+                            metal_values = cursor.execute("""
+                                SELECT items.price * inventory.quantity
+                                FROM inventory
+                                JOIN items ON inventory.item_id = items.item_id
+                                WHERE user_id=? AND items.item_name IN ('Copper', 'Platinum', 'Gold', 'Silver', 'Lithium')
+                            """, (user_id,)).fetchall()
+
+                            # Adding default value for cases where data is not available
+                            total_metal_value = sum(metal_value[0] for metal_value in metal_values) or 0
+                        except Exception as e:
+                            total_metal_value = 0
+
+                        # Get P3:Stable value
+                        stable_stock = "P3:Stable"
+                        stable_stock_price = await get_stock_price(self, ctx, stable_stock) or 0
+                        user_owned_stable = self.get_user_stock_amount(user_id, stable_stock) or 0
+                        user_stable_value = stable_stock_price * user_owned_stable
+
+                        # Calculate total value of all funds
+                        total_funds_value = current_balance + total_stock_value + total_etf_value + total_metal_value
+
+                        current_month_name = calendar.month_name[datetime.now().month]
+
+
+                        # Create the embed
+                        embed = Embed(title=f"{P3Addr} Financial Stats", color=Colour.green())
+                        embed.set_thumbnail(url="attachment://market-stats.jpeg")
+                        embed.add_field(name="Balance", value=f"{current_balance:,.0f} $QSE" if current_balance != 0 else "0", inline=False)
+                        embed.add_field(name="Total Stock Value", value=f"{total_stock_value:,.0f} $QSE" if total_stock_value != 0 else "0", inline=False)
+                        embed.add_field(name="Total ETP Value", value=f"{total_etf_value:,.0f} $QSE" if total_etf_value != 0 else "0", inline=False)
+                        embed.add_field(name="P3:Stable Value", value=f"{user_stable_value:,.0f} $QSE" if user_stable_value != 0 else "0", inline=False)
+                        embed.add_field(name="Total Metal Value", value=f"{total_metal_value:,.2f} $QSE" if total_metal_value != 0 else "0", inline=False)
+                        shares_in_escrow = await get_total_shares_in_escrow_user(self, user_id)
+                        embed.add_field(name="Total Escrow", value=f"{shares_in_escrow:,.0f} shares" if shares_in_escrow != 0 else "0", inline=False)
+                        embed.add_field(name="Total Funds Value", value=f"{total_funds_value:,.0f} $QSE" if total_funds_value != 0 else "0", inline=False)
+
+                        await ctx.send(embed=embed, file=File("./stock_images/market-stats.jpeg"))
+                        await tax_command(self, ctx)
+                        elapsed_time = timeit.default_timer() - self.tax_command_timer_start
+                        self.tax_command_avg.append(elapsed_time)
+                        avg_time = sum(self.tax_command_avg) / len(self.tax_command_avg)
+
+                        if address != P3Addr:
+                            await self.rpg_stats(ctx)
+
+                except sqlite3.Error as e:
+                    print(f"Database error: {e}")
+                    await ctx.send("An error occurred while retrieving your stats. Please try again later.")
+
+                except Exception as e:
+                    print(f"An unexpected error occurred: {e}")
+                    await ctx.send("An unexpected error occurred. Please try again later.")
+
+
+
+
+    async def city_value(self):
+        cursor = self.conn.cursor()
+        # Fetch the user count and new city statistics
+        cursor.execute("""
+            SELECT c.current_city, s.QSE, s.Resources, s.Stocks, s.ETPs
+            FROM users_rpg_cities c
+            LEFT JOIN user_city_stats s ON c.current_city = s.city
+            WHERE c.current_city IS NOT NULL
+            GROUP BY c.current_city
+        """)
+        city_stats = cursor.fetchall()
+
+        qse_integer = 0  # Initialize qse_integer before the loop
+
+        if city_stats:
+            for city, qse, resources, stocks, etps in city_stats:
+                try:
+                    qse_integer += int(qse) if qse is not None else 0
+                except ValueError:
+                    # Handle the case where qse is not a valid integer
+                    pass  # You may want to log or handle this error
+
+        return qse_integer
+
+
+    @commands.command(name="stock_volume")
+    async def stock_volume(self, ctx):
+        await plot_daily_volume_chart(self, ctx)
+
+    @commands.command(name='total_stats', aliases=['total_portfolio', 'market_stats'], help='Displays the total financial stats of all users.')
+    @is_allowed_user(930513222820331590, PBot)
+    async def total_stats(self, ctx):
+        self.is_halted = True
+        self.is_halted_order = True
+        total_escrow_value = 0
+        try:
+            Pbot_Balance = 0
+            # Connect to databases using context managers
+            with sqlite3.connect('currency_system.db') as conn, sqlite3.connect("p3ledger.db") as ledger_conn, sqlite3.connect("P3addr.db") as addr_conn:
+                cursor = conn.cursor()
+                ledger_cursor = ledger_conn.cursor()
+                addr_cursor = addr_conn.cursor()
+
+                # Calculate Total Escrow Value
+                cursor.execute("SELECT symbol, available, total_supply, price FROM stocks")
+                stocks = cursor.fetchall()
+                for symbol in stocks:
+                    escrow_value = 0
+                    total_shares_in_orders = await get_total_shares_in_orders(self, symbol[0])
+                    if total_shares_in_orders:
+                        avg_buy, avg_sell = await calculate_average_prices_by_symbol(self, symbol[0])
+                        current_price = await get_stock_price(self, ctx, symbol[0])
+                        escrow_value = total_shares_in_orders * current_price
+                        total_escrow_value += escrow_value
+
+
+				#Calculate City Value
+                city_qse_value = 0
+                city_stock_value = 0
+                cities = [1224458697728593962, 1224461917448437892, 1224463766956015670, 1224465106835083348]
+                for city in cities:
+                    # Calculate total stock value
+                    cursor.execute("SELECT balance FROM users WHERE user_id = ?", (city,))
+                    row = cursor.fetchone()
+                    city_qse_value += row[0]
+
+                    # Calculate total stock value
+                    cursor.execute("SELECT symbol, amount FROM user_stocks WHERE user_id=?", (city,))
+                    user_stocks = cursor.fetchall()
+                    for symbol, amount in user_stocks:
+                        cursor.execute("SELECT price FROM stocks WHERE symbol=?", (symbol,))
+                        stock_price_row = cursor.fetchone()
+                        stock_price = await get_stock_price(self, ctx, symbol) if stock_price_row else 0
+                        city_stock_value += stock_price * amount
+
+
+                city_total_value = city_qse_value + city_stock_value
+                print(f"City QSE Total -> {city_qse_value:,.2f}\nCity Stock Total -> {city_stock_value:,.2f}\nTotal -> {city_total_value:,.2f}")
+
+
+                # Calculate total stock value
+                cursor.execute("SELECT balance FROM users WHERE user_id = ?", (PBot,))
+                row = cursor.fetchone()
+                Pbot_Balance = row[0]
+
+                # Calculate total stock value
+                cursor.execute("SELECT symbol, amount FROM user_stocks WHERE user_id=?", (PBot,))
+                user_stocks = cursor.fetchall()
+                reserve_stock_value = 0
+
+                for symbol, amount in user_stocks:
+                    cursor.execute("SELECT price FROM stocks WHERE symbol=?", (symbol,))
+                    stock_price_row = cursor.fetchone()
+                    stock_price = await get_stock_price(self, ctx, symbol) if stock_price_row else 0
+                    reserve_stock_value += stock_price * amount
+
+                reserve_stock_value = reserve_stock_value - total_escrow_value
+                MAX_BALANCE = Pbot_Balance + reserve_stock_value
+
+                # Get all user IDs from P3addr.db
+                user_ids_result = addr_cursor.execute("SELECT DISTINCT user_id FROM user_addresses").fetchall()
+                all_user_ids = [user_id for user_id, in user_ids_result]
+
+                # Initialize total values
+                total_balance = 0
+                total_stock_value = 0
+                total_stable_value = 0
+                total_metal_value = 0
+                total_funds_value = 0
+                user_stock_value = 0
+                user_qse = 0
+                total_updown_value = get_total_current_prices(self)
+
+                # Iterate over each user
+                for user_id in all_user_ids:
+                    try:
+                        # Get user balance
+                        current_balance = float(get_user_balance(conn, user_id))
+                        user_qse += current_balance
+
+                        # Calculate total stock value
+                        user_stocks = cursor.execute("SELECT symbol, amount FROM user_stocks WHERE user_id=?", (user_id,)).fetchall()
+
+
+                        for symbol, amount in user_stocks:
+                            # Fetch the stock price asynchronously
+                            price = await get_stock_price(self, ctx, symbol)
+
+
+                            # Calculate the value of the current stock holding and add it to the total stock value
+                            user_stock_value += price * amount
+                        user_stock_value = abs(user_stock_value - city_stock_value)
+
+
+
+                        # Calculate total value of metals in the user's inventory
+                        metal_values = cursor.execute("""
+                            SELECT items.price * inventory.quantity
+                            FROM inventory
+                            JOIN items ON inventory.item_id = items.item_id
+                            WHERE user_id=? AND items.item_name IN ('Copper', 'Platinum', 'Gold', 'Silver', 'Lithium')
+                        """, (user_id,)).fetchall()
+                        total_metal_value += sum(metal_value[0] for metal_value in metal_values) or 0
+
+                        cursor.execute("SELECT symbol, available, price, total_supply FROM stocks")
+                        stocks_data = cursor.fetchall()
+
+                        market_stock_value = 0
+                        locked_stock_value = 0
+                        open_stock_value = 0
+                        escrow_stock_value = 0
+                        # Iterate over stocks data and calculate the total market value
+                        for symbol, available, price, total_supply in stocks_data:
+                            # Fetch the stock price asynchronously
+                            stock_price = await get_stock_price(self, ctx, symbol)
+                            result = await get_supply_stats(self, ctx, symbol)
+                            reserve, total, locked, escrow, market, circulating = result
+
+
+                            # Calculate the total market value for the current stock
+                            total_stock_value = stock_price * total
+                            lock_stock = stock_price * locked
+                            open_stock = stock_price * market
+                            escrow_stock = stock_price * escrow
+
+                            # Add the total market value for the current stock to the total market stock value
+                            market_stock_value += total_stock_value
+                            locked_stock_value += lock_stock
+                            open_stock_value += open_stock
+                            escrow_stock_value += escrow_stock
+
+                        # Get P3:Stable value
+                        stable_stock = "P3:Stable"
+                        stable_stock_price = await get_stock_price(self, ctx, stable_stock) or 0
+                        user_owned_stable = self.get_user_stock_amount(user_id, stable_stock) or 0
+                        total_stable_value += stable_stock_price * user_owned_stable
+
+
+                    except Exception as e:
+                        print(f"An error occurred for user {user_id}: {e}")
+
+
+                    try:
+                        # Calculate the total value of metals in the user's inventory
+                        reserve_metal_values = cursor.execute("""
+                            SELECT items.price * inventory.quantity
+                            FROM inventory
+                            JOIN items ON inventory.item_id = items.item_id
+                            WHERE user_id=? AND items.item_name IN ('Copper', 'Platinum', 'Gold', 'Silver', 'Lithium')
+                        """, (PBot,)).fetchall()
+
+                        # Adding default value for cases where data is not available
+                        reserve_metal_value = sum(reserve_metal_value[0] for reserve_metal_value in reserve_metal_values) or 0
+                    except Exception as e:
+                        reserve_metal_value = 0
+
+
+
+                total_etf_value = 0
+                etfs_buy = [1, 13, 14, 4, 15]
+                for etf_id in etfs_buy:
+                    etf_shares = await get_total_etf_shares(self, etf_id)
+                    etf_avbl = await get_available_etf_shares(self, etf_id)
+                    etf_value = await get_etf_value(self, ctx, etf_id)
+                    print(f"ETF: {etf_id} Value: {etf_value:,.2f} avbl: {etf_avbl:,.0f} total: {etf_shares:,.0f} community value: {((etf_shares - etf_avbl) * etf_value):,.2f}")
+                    total_etf_value += ((etf_shares - etf_avbl) * etf_value)
+                qse_integer = await self.city_value()
+                bank_qse = await get_total_qse_deposited(self)
+#                Pbot_Balance = abs(Pbot_Balance - bank_qse)
+                surplus = Pbot_Balance - abs(user_stock_value + total_etf_value + total_metal_value)
+
+
+                # Calculate total funds value for each user
+                user_balance = abs((user_qse + user_stock_value + total_etf_value + total_escrow_value + total_updown_value) - (Pbot_Balance + city_qse_value))
+                total_balance = abs(user_qse + user_stock_value + total_etf_value + total_metal_value + total_escrow_value + total_updown_value )#+ reserve_metal_value) #+ qse_integer)
+                market_etf_value = 0
+                etfs = ['1', '13', '14', '4', '15']
+                for etf_id in etfs:
+                    etf_price = await get_etf_value(self, ctx, etf_id)
+                    etf_total = await get_total_etf_shares(self, etf_id)
+                    market_etf_value += (etf_price * etf_total)
+
+
+                # Create the embed for total stats
+                embed = Embed(title="Market Financial Book", color=Colour.green())
+                embed.add_field(name="Community QSE:", value=f"{(abs(user_qse - Pbot_Balance)):,.0f} $QSE\n({(((abs(user_qse - Pbot_Balance) / total_balance) * 100)):,.4f}%)", inline=False)
+                embed.add_field(name="Community Stock Value:", value=f"{(user_stock_value):,.0f} $QSE\n(Market: {((user_stock_value / total_balance) * 100):,.4f}%)\n(Total Stock Supply: {((user_stock_value / market_stock_value) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="Community ETP Value:", value=f"{total_etf_value:,.0f} $QSE\n(Market: {((total_etf_value / total_balance) * 100):,.4f}%)\n(Total ETF Supply: {((total_etf_value / market_etf_value) * 100):,.4f})%", inline=False)
+                embed.add_field(name="Community P3:Stable Value:", value=f"{total_stable_value:,.0f} $QSE\n({((total_stable_value / total_balance) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="Community Metal Value:", value=f"{total_metal_value:,.0f} $QSE\n({((total_metal_value / total_balance) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="Community Escrow Value:", value=f"{total_escrow_value:,.0f} $QSE\n(Market: {((total_escrow_value / total_balance) * 100):,.4f}%)\n(Total Stock Supply: {((total_escrow_value / market_stock_value) * 100):,.4f}%)", inline=False)
+#                embed.add_field(name="Community UpDown Value:", value=f"{total_updown_value:,.0f} $QSE\n({((total_updown_value / total_balance) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="Community Asset Value:", value=f"{user_balance:,.0f} $QSE\n({((user_balance / total_balance) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="", value="---------------------------------------------", inline=False)
+                embed.add_field(name="Reserve QSE:", value=f"{Pbot_Balance:,.0f} $QSE\n({((Pbot_Balance / total_balance) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="Reserve Surplus QSE:", value=f"{surplus:,.0f} $QSE\n({((surplus / total_balance) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="Reserve Bank QSE:", value=f"{bank_qse:,.0f} $QSE\n({((bank_qse / total_balance) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="Reserve Metal Value:", value=f"{reserve_metal_value:,.0f} $QSE\n({((reserve_metal_value / total_balance) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="Reserve Stock Value:", value=f"{reserve_stock_value:,.0f} $QSE\nMarket: ({((reserve_stock_value / total_balance) * 100):,.4f}%)\nTotal Stock Supply: ({((reserve_stock_value / market_stock_value) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="Reserve Funds:", value=f"{MAX_BALANCE:,.0f} $QSE\n({((MAX_BALANCE / total_balance) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="", value="---------------------------------------------", inline=False)
+                embed.add_field(name="City QSE:", value=f"{city_qse_value:,.0f} $QSE\n({((city_qse_value / total_balance) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="City Stock Value:", value=f"{city_stock_value:,.0f} $QSE\n({((city_stock_value / total_balance) * 100):,.4f}%)", inline=False)
+#                embed.add_field(name="City Asset Value:", value=f"{city_total_value:,.0f} $QSE\n({((city_total_value / total_balance) * 100):,.4f}%)", inline=False)
+                embed.add_field(name="", value="---------------------------------------------", inline=False)
+                embed.add_field(name="Escrow Stock Supply Value:", value=f"{escrow_stock_value:,.0f} $QSE", inline=False)
+                embed.add_field(name="Locked Stock Supply Value:", value=f"{locked_stock_value:,.0f} $QSE", inline=False)
+                embed.add_field(name="Market Stock Supply Value:", value=f"{open_stock_value:,.0f} $QSE", inline=False)
+                embed.add_field(name="Total Stock Supply Value:", value=f"{market_stock_value:,.0f} $QSE", inline=False)
+                embed.add_field(name="", value="---------------------------------------------", inline=False)
+                embed.add_field(name="Total ETF Supply Value:", value=f"{market_etf_value:,.0f} $QSE", inline=False)
+                embed.add_field(name="Total Market Value:", value=f"{total_balance:,.0f} $QSE", inline=False)
+
+                await ctx.send(embed=embed)
+                await  self.market_chart(ctx)
+                await self.reserve_chart(ctx)
+                await self.top_stocks1(ctx)
+                await self.circuit_stats(ctx)
+                self.is_halted = False
+                self.is_halted_order = False
+
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+            await ctx.send("An error occurred while retrieving total stats. Please try again later.")
+            self.is_halted = False
+            self.is_halted_order = False
+
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+            await ctx.send("An unexpected error occurred. Please try again later.")
+            self.is_halted = False
+            self.is_halted_order = False
+
+
+    @commands.command(name='leaderboard', aliases=['top10'], help='Displays the top 10 P/L for Stocks and ETFs.')
+    async def leaderboard(self, ctx):
+        try:
+            with sqlite3.connect('currency_system.db') as conn, sqlite3.connect("p3ledger.db") as ledger_conn:
+                cursor = conn.cursor()
+                ledger_cursor = ledger_conn.cursor()
+
+                # Get the top 10 Stocks based on P/L
+                top_stock_data = ledger_cursor.execute("""
+                    SELECT symbol, SUM(CASE WHEN action='Sell Stock' THEN -price ELSE price END) AS total_pl
+                    FROM stock_transactions
+                    WHERE action IN ('Buy Stock', 'Sell Stock') AND quantity > 0
+                    GROUP BY symbol
+                    ORDER BY total_pl DESC
+                    LIMIT 10
+                """).fetchall()
+
+                # Get the top 10 ETFs based on P/L
+                top_etf_data = ledger_cursor.execute("""
+                    SELECT etf_id, SUM(CASE WHEN action IN ('Sell ETF', 'Sell ALL ETF') THEN -price ELSE price END) AS total_pl
+                    FROM stock_transactions
+                    WHERE action IN ('Buy ETF', 'Sell ETF', 'Buy ALL ETF', 'Sell ALL ETF') AND quantity > 0
+                    GROUP BY etf_id
+                    ORDER BY total_pl DESC
+                    LIMIT 10
+                """).fetchall()
+
+                # Create the embed for Stocks leaderboard
+                stock_leaderboard_embed = Embed(title="Top 10 Stocks P/L", color=Colour.blue())
+                for rank, (symbol, total_pl) in enumerate(top_stock_data, start=1):
+                    stock_leaderboard_embed.add_field(name=f"{rank}. {symbol}", value=f"Total P/L: {total_pl:,.0f} $QSE", inline=False)
+
+                # Create the embed for ETFs leaderboard
+                etf_leaderboard_embed = Embed(title="Top 10 ETFs P/L", color=Colour.orange())
+                for rank, (etf_id, total_pl) in enumerate(top_etf_data, start=1):
+                    etf_leaderboard_embed.add_field(name=f"{rank}. {etf_id}", value=f"Total P/L: {total_pl:,.0f} $QSE", inline=False)
+
+                await ctx.send(embed=stock_leaderboard_embed)
+                await ctx.send(embed=etf_leaderboard_embed)
+
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+            await ctx.send("An error occurred while retrieving the leaderboard. Please try again later.")
+
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+            await ctx.send("An unexpected error occurred. Please try again later.")
+
+
+    @commands.command(name='check_stocks', help='Check which stocks you can still buy.')
+    async def check_stocks(self, ctx):
+        user_id = ctx.author.id
+        member = ctx.guild.get_member(user_id)
+
+        # Calculate stock limit based on user's role
+        dStockLimit = 150000000 * 1.25 if has_role(member, bronze_pass) else 150000000
+
+        # Check if the user has a last checked time stored in the database
+        last_checked_time = self.get_last_checked_time(user_id)
+
+        # Get the current UTC time
+        current_utc_time = datetime.datetime.utcnow().replace(tzinfo=timezone.utc)
+
+        # Calculate the time elapsed since the last check in hours
+        time_elapsed_hours = (current_utc_time - last_checked_time).total_seconds() / 3600 if last_checked_time else 1
+
+        if time_elapsed_hours >= 1:
+            # Connect to the database using a context manager
+            with sqlite3.connect("currency_system.db") as conn:
+                cursor = conn.cursor()
+
+                # Fetch all stock symbols and their available amounts
+                cursor.execute("SELECT symbol, available FROM stocks")
+                all_stocks = cursor.fetchall()
+
+                # Fetch daily bought amounts for each stock
+                cursor.execute("""
+                    SELECT symbol, COALESCE(SUM(amount), 0)
+                    FROM user_daily_buys
+                    WHERE user_id=? AND DATE(timestamp)=DATE('now')
+                    GROUP BY symbol
+                """, (user_id,))
+                hourly_bought_records = dict(cursor.fetchall())
+
+            # Calculate remaining amounts for each stock the user can buy today
+            stocks_can_buy = {stock: dStockLimit - hourly_bought_records.get(stock, 0) for stock, _ in all_stocks}
+
+            if stocks_can_buy:
+                # Split the stocks into pages with a maximum of 5 stocks per page
+                stock_pages = list(chunks(stocks_can_buy, 5))
+
+                # Send the first page
+                page_num = 0
+                message = await ctx.send(embed=create_stock_page(stock_pages[page_num]), delete_after=60.0)
+
+                # Update the last checked time in the database
+                self.update_last_checked_time(user_id, current_utc_time)
+
+                # Add reactions for pagination
+                if len(stock_pages) > 1:
+                    await message.add_reaction("◀️")
+                    await message.add_reaction("▶️")
+
+                def check(reaction, user):
+                    return user == ctx.author and reaction.message.id == message.id
+
+                while True:
+                    try:
+                        reaction, _ = await self.bot.wait_for('reaction_add', timeout=60.0, check=check)
+
+                        if str(reaction.emoji) == "◀️" and page_num > 0:
+                            page_num -= 1
+                            await message.edit(embed=create_stock_page(stock_pages[page_num]))
+                        elif str(reaction.emoji) == "▶️" and page_num < len(stock_pages) - 1:
+                            page_num += 1
+                            await message.edit(embed=create_stock_page(stock_pages[page_num]))
+
+                        await message.remove_reaction(reaction, ctx.author)
+
+                    except asyncio.TimeoutError:
+                        break
+        else:
+            remaining_time_minutes = round((1 - time_elapsed_hours) * 60)
+            message = f"{ctx.author.mention}, you can check stocks again in {remaining_time_minutes} minutes."
+            await ctx.send(message)
+
+
+
+
+
+    @commands.command(name="create_swap_order", help="Place a swap order to exchange stocks.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def swap_stocks(self, ctx, stock1_name: str, amount1: int, stock2_name: str, amount2: int):
+        user_id = ctx.author.id
+        cursor = self.conn.cursor()
+
+        # Fetch user's stock holdings
+        cursor.execute("SELECT amount, price FROM user_stocks JOIN stocks ON user_stocks.symbol=stocks.symbol WHERE user_id=? AND user_stocks.symbol=?", (user_id, stock1_name))
+        user_stock1 = cursor.fetchone()
+        cursor.execute("SELECT amount, price FROM user_stocks JOIN stocks ON user_stocks.symbol=stocks.symbol WHERE user_id=? AND user_stocks.symbol=?", (user_id, stock2_name))
+        user_stock2 = cursor.fetchone()
+
+        if not user_stock1 or not user_stock2:
+            await ctx.send("One or both of the specified stocks do not exist in your holdings.")
+            return
+
+        stock1_amount, stock1_price = user_stock1[0], user_stock1[1]
+        stock2_amount, stock2_price = user_stock2[0], user_stock2[1]
+
+        value1 = stock1_price * amount1
+        value2 = stock2_price * amount2
+
+        # Place swap order in the database
+        cursor.execute("INSERT INTO swap_orders (user_id, stock1, amount1, stock2, amount2, status) VALUES (?, ?, ?, ?, ?, 'open')", (user_id, stock1_name, amount1, stock2_name, amount2))
+        self.conn.commit()
+
+        await ctx.send(f"Swap order placed. The system will attempt to match your order with another user's order for a fair trade.")
+
+    @commands.command(name="open_swap_orders", help="View all open swap orders.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def open_swap_orders(self, ctx):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM swap_orders WHERE status='open'")
+        orders = cursor.fetchall()
+
+        if orders:
+            order_list = "\n".join([f"Order ID: {order[0]}, User: {generate_crypto_address(order[1])}, Stock 1: {order[2]}, Amount 1: {order[3]}, Stock 2: {order[4]}, Amount 2: {order[5]}" for order in orders])
+            await ctx.send(f"Open Swap Orders:\n{order_list}")
+        else:
+            await ctx.send("No open swap orders.")
+
+    @commands.command(name="my_swap_orders", help="View your own open swap orders.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def my_swap_orders(self, ctx):
+        user_id = ctx.author.id
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM swap_orders WHERE user_id=? AND status='open'", (user_id,))
+        orders = cursor.fetchall()
+
+        if orders:
+            order_list = "\n".join([f"Order ID: {order[0]}, Stock 1: {order[2]}, Amount 1: {order[3]}, Stock 2: {order[4]}, Amount 2: {order[5]}" for order in orders])
+            await ctx.send(f"Your Open Swap Orders:\n{order_list}")
+        else:
+            await ctx.send("You have no open swap orders.")
+
+    @commands.command(name="close_swap_order", help="Close your own open swap order.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def close_swap_order(self, ctx, order_id: int):
+        user_id = ctx.author.id
+        cursor = self.conn.cursor()
+
+        # Check if the order belongs to the user and is open
+        cursor.execute("SELECT * FROM swap_orders WHERE id=? AND user_id=? AND status='open'", (order_id, user_id))
+        order = cursor.fetchone()
+
+        if order:
+            # Close the order
+            cursor.execute("UPDATE swap_orders SET status='matched' WHERE id=?", (order_id,))
+            self.conn.commit()
+            await ctx.send(f"Swap order {order_id} closed successfully.")
+        else:
+            await ctx.send("The specified order does not exist or is not open.")
+
+    @commands.command(name="match_swap_order", help="Attempt to match open swap orders.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def match_swap_order(self, ctx):
+        user_id = ctx.author.id
+        cursor = self.conn.cursor()
+
+        try:
+            # Fetch user's open swap orders
+            cursor.execute("SELECT * FROM swap_orders WHERE user_id=? AND status='open'", (user_id,))
+            user_orders = cursor.fetchall()
+
+            if not user_orders:
+                await ctx.send("You have no open swap orders.")
+                return
+
+            # Fetch all other open swap orders that are compatible with the user's orders
+            compatible_orders = []
+            for user_order in user_orders:
+                stock1, amount1, stock2, amount2 = user_order[2], user_order[3], user_order[4], user_order[5]
+                cursor.execute("""
+                    SELECT *
+                    FROM swap_orders
+                    WHERE status='open'
+                    AND ((stock1=? AND amount1<=? AND stock2 IN (SELECT stock1 FROM swap_orders WHERE status='open' AND stock2=? AND amount2<=?))
+                        OR (stock2=? AND amount2<=? AND stock1 IN (SELECT stock2 FROM swap_orders WHERE status='open' AND stock1=? AND amount1<=?)))
+                """, (stock1, amount1, stock2, amount2, stock2, amount2, stock1, amount1))
+                compatible_orders.extend(cursor.fetchall())
+
+            if not compatible_orders:
+                await ctx.send("No compatible open swap orders found.")
+                return
+
+            # Match orders and execute swaps
+            for compatible_order in compatible_orders:
+                matched_order_id = compatible_order[0]
+
+                # Close the user's order
+                cursor.execute("UPDATE swap_orders SET status='matched' WHERE id=?", (matched_order_id,))
+
+                # Close the matched order
+                cursor.execute("UPDATE swap_orders SET status='matched' WHERE id=?", (user_order[0],))
+
+                # Execute the stock swap (placeholder logic, update based on your implementation)
+                self.execute_stock_swap(user_order, compatible_order)
+
+                self.conn.commit()
+
+            await ctx.send("Swap orders matched successfully.")
+
+        except sqlite3.Error as e:
+            # Handle database errors
+            print(f"Database error: {e}")
+            await ctx.send("An error occurred while processing the swap orders. Please try again later.")
+
+        except Exception as e:
+            # Handle unexpected errors
+            print(f"An unexpected error occurred: {e}")
+            await ctx.send("An unexpected error occurred. Please try again later.")
+
+

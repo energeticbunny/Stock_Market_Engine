@@ -1,0 +1,255 @@
+# Begin Firm Engine
+
+def list_teams_leaderboard(conn):
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT name, total_profit_loss FROM trading_teams
+        ORDER BY total_profit_loss DESC
+    """)
+    leaderboard = cursor.fetchall()
+    return leaderboard
+
+
+def calculate_team_profit_loss(conn, team_id):
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT type, amount, price FROM team_transactions WHERE team_id = ?
+    """, (team_id,))
+    transactions = cursor.fetchall()
+
+    profit_loss = 0
+    for type, amount, price in transactions:
+        if type == "buy":
+            profit_loss -= amount * price
+        elif type == "sell":
+            profit_loss += amount * price
+
+    cursor.execute("""
+        UPDATE trading_teams
+        SET total_profit_loss = ?
+        WHERE team_id = ?
+    """, (profit_loss, team_id))
+
+    conn.commit()
+    return profit_loss
+
+
+def record_team_transaction(conn, team_id, symbol, amount, price, type):
+    cursor = conn.cursor()
+    price_as_float = float(price)  # Convert the Decimal to a float
+    cursor.execute("""
+        INSERT INTO team_transactions (team_id, symbol, amount, price, type)
+        VALUES (?, ?, ?, ?, ?)
+    """, (team_id, symbol, amount, price_as_float, type))  # Use the float value here
+    conn.commit()
+
+
+def join_trading_team(conn, user_id, team_id):
+    cursor = conn.cursor()
+    cursor.execute("""
+        DELETE FROM team_members WHERE user_id = ?
+    """, (user_id,))
+    cursor.execute("""
+        INSERT INTO team_members (user_id, team_id)
+        VALUES (?, ?)
+    """, (user_id, team_id))
+    conn.commit()
+
+
+def create_trading_team(conn, name):
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO trading_teams (name)
+        VALUES (?)
+    """, (name,))
+    conn.commit()
+
+
+@staticmethod
+def execute_stock_swap(user_order, matched_order):
+    user_id = user_order[1]
+    stock1, amount1, stock2, amount2 = user_order[2], user_order[3], user_order[4], user_order[5]
+    matched_user_id = matched_order[1]
+    matched_stock1, matched_amount1, matched_stock2, matched_amount2 = matched_order[2], matched_order[3], matched_order[4], matched_order[5]
+
+    cursor = self.conn.cursor()
+
+    try:
+        # Fetch user's stock holdings
+        cursor.execute("SELECT amount FROM user_stocks WHERE user_id=? AND symbol=?", (user_id, stock1))
+        user_stock1_amount = cursor.fetchone()[0]
+        cursor.execute("SELECT amount FROM user_stocks WHERE user_id=? AND symbol=?", (user_id, stock2))
+        user_stock2_amount = cursor.fetchone()[0]
+
+        # Fetch matched user's stock holdings
+        cursor.execute("SELECT amount FROM user_stocks WHERE user_id=? AND symbol=?", (matched_user_id, matched_stock1))
+        matched_user_stock1_amount = cursor.fetchone()[0]
+        cursor.execute("SELECT amount FROM user_stocks WHERE user_id=? AND symbol=?", (matched_user_id, matched_stock2))
+        matched_user_stock2_amount = cursor.fetchone()[0]
+
+        # Update user's stock holdings
+        cursor.execute("UPDATE user_stocks SET amount=? WHERE user_id=? AND symbol=?", (user_stock1_amount - amount1 + amount2, user_id, stock1))
+        cursor.execute("UPDATE user_stocks SET amount=? WHERE user_id=? AND symbol=?", (user_stock2_amount - amount2 + amount1, user_id, stock2))
+
+        # Update matched user's stock holdings
+        cursor.execute("UPDATE user_stocks SET amount=? WHERE user_id=? AND symbol=?", (matched_user_stock1_amount - matched_amount1 + matched_amount2, matched_user_id, matched_stock1))
+        cursor.execute("UPDATE user_stocks SET amount=? WHERE user_id=? AND symbol=?", (matched_user_stock2_amount - matched_amount2 + matched_amount1, matched_user_id, matched_stock2))
+
+        # Commit the changes
+        self.conn.commit()
+
+        print("Stock swap executed successfully.")
+
+    except sqlite3.Error as e:
+        # Handle database errors
+        print(f"Database error during stock swap: {e}")
+
+    except Exception as e:
+        # Handle unexpected errors
+        print(f"Unexpected error during stock swap: {e}")
+
+
+async def get_city_prices_for_stock(self, ctx, symbol: str, city: str):
+    # Fetch city configurations
+    city_prices = await get_city_config(self, city)
+    if city_prices:
+        buy_price = 0
+        sell_price = 0
+        cp = await get_stock_price(self, ctx, symbol)
+        buy_price_multiplier = city_prices["buy_margin"]
+        buy_price = (cp * buy_price_multiplier) + cp
+        sell_price_multiplier = city_prices["sell_margin"]
+        sell_price = cp - (cp * sell_price_multiplier)
+        return buy_price, sell_price
+
+    else:
+        return None, None
+
+async def get_city_addr(self, ctx, city):
+    city_id = await get_city_id(self, city)
+    addrDB = sqlite3.connect("P3addr.db")
+    p3_address = get_p3_address(addrDB, city_id)
+    return p3_address
+
+
+async def get_city_tax(self, ctx, city: str):
+    # Fetch city configurations
+    city_config = await get_city_config(self, city)
+    if city_config:
+        city_tax = city_config["tax_rate"]
+
+        return city_tax
+
+    else:
+        return 0
+
+async def get_city_config(self, city_name):
+    # Retrieve the configuration for the specified city
+    return self.city_config.get(city_name, {})
+
+
+async def get_city_id(self, city_name):
+    # Retrieve the configuration for the specified city
+    return self.city_ids.get(city_name)
+
+def is_allowed_user(*user_ids):
+    async def predicate(ctx):
+        if ctx.author.id not in user_ids:
+            await ctx.send("You do not have the required permissions to use this command.")
+            return False
+        return True
+    return commands.check(predicate)
+
+def is_not_allowed_user(*user_ids):
+    async def predicate(ctx):
+        if ctx.author.id in user_ids:
+            await ctx.send("You do not have the required permissions to use this command.")
+            return False
+        return True
+    return commands.check(predicate)
+
+def is_allowed_server(*server_ids):
+    async def predicate(ctx):
+        return ctx.guild.id in server_ids
+    return commands.check(predicate)
+
+
+def insert_raffle_tickets(conn, user_id, quantity, timestamp):
+    cursor = conn.cursor()
+    cursor.execute("INSERT INTO raffle_tickets (user_id, quantity, timestamp) VALUES (?, ?, ?, ?)",
+                   (user_id, quantity, timestamp))
+    conn.commit()
+
+#stock
+
+
+class Stock:
+    def __init__(self, conn, symbol):
+        self.conn = conn
+        self.symbol = symbol
+
+    @property
+    def name(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT name FROM stocks WHERE symbol=?", (self.symbol,))
+        result = cursor.fetchone()
+        return result["name"] if result else None
+
+    @property
+    def price(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT price FROM stocks WHERE symbol=?", (self.symbol,))
+        result = cursor.fetchone()
+        return result["price"] if result else None
+
+    @property
+    def available(self):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT available FROM stocks WHERE symbol=?", (self.symbol,))
+        result = cursor.fetchone()
+        return result["available"] if result else None
+
+
+    @price.setter
+    def price(self, value):
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE stocks SET price=? WHERE symbol=?", (value, self.symbol))
+        self.conn.commit()
+
+
+class StockMarket:
+    def __init__(self, conn):
+        self.conn = conn
+        self.market_summary.start()
+
+    def get_stock(self, symbol):
+        return Stock(self.conn, symbol)
+
+
+class StockBot(commands.Bot):
+    # Define the etf_values dictionary as a class attribute
+    etf_values = {
+        "5 minutes": None,
+        "15 minutes": None,
+        "30 minutes": None,
+        "1 hour": None,
+        "3 hours": None,
+        "6 hours": None,
+        "12 hours": None,
+        "24 hours": None,
+    }
+
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    async def on_ready(self):
+        print(f"Logged in as {self.user.name}")
+
+    async def on_command_error(self, ctx, error):
+        if isinstance(error, commands.CommandError):
+            print(f"Command Error: {error}")
+        else:
+            raise error
+
+

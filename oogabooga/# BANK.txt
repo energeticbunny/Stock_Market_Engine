@@ -1,0 +1,141 @@
+# BANK
+
+
+    @commands.command(name="Open_Bank")
+    async def open_bank(self, ctx, bank_name: str):
+        await create_bank(self, bank_name)
+
+
+
+    @commands.command(name="debug_bank")
+    async def debug_bank(self, ctx):
+        await show_all_banks(self)
+
+
+    @commands.command(name="bank")
+    async def bank(self, ctx, command):
+        if command.lower() == "create":
+            user_balance = get_user_balance(self.conn, ctx.author.id)
+            if user_balance > 100_000:
+                result = await create_user_account(self, ctx, 1)
+                if result:
+                    await update_user_balance(self.conn, ctx.author.id, user_balance - 100000)
+                    await ctx.send(f"{result}")
+                    return
+                return
+            else:
+                await ctx.send("You need 100,000 QSE to open an account")
+                return
+        elif command.lower() == "account":
+            result = await view_account(self, ctx,  1)
+            if result:
+                await ctx.send(embed=result)
+        elif command.lower() == "deposit":
+            user_balance = get_user_balance(self.conn, ctx.author.id)
+            await ctx.send(f"Current Balance: {user_balance:,.0f}")
+            await ctx.send("How much QSE would you like to deposit?")
+
+            def check(msg):
+                return msg.author == ctx.author and msg.channel == ctx.channel
+
+            # Wait for user input
+            response = await self.bot.wait_for('message', check=check, timeout=60)  # Adjust timeout as needed
+
+            # Parse the user input
+            amount = float(response.content)
+            if amount < 100_000_000:
+                await ctx.send("Deposit must be greater than 100,000,000 QSE")
+                return
+            if user_balance < amount:
+                await ctx.send(f"{amount:,.0f} greater than current balance of {user_balance:,.0f}")
+                return
+            else:
+                PBotAddr = get_p3_address(self.P3addrConn, PBot)
+                await self.give_addr(ctx, PBotAddr, Decimal(amount), False)
+                result = await deposit_qse(self, ctx, 1, amount)
+                if result:
+                    await ctx.send(result)
+        elif command.lower() == "withdrawal":
+            result = await view_account(self, ctx,  1)
+            if result:
+                await ctx.send(embed=result)
+            await ctx.send("How much QSE would you like to withdrawal?")
+
+            def check(msg):
+                return msg.author == ctx.author and msg.channel == ctx.channel
+
+            # Wait for user input
+            response = await self.bot.wait_for('message', check=check, timeout=60)  # Adjust timeout as needed
+
+            # Parse the user input
+            amount = float(response.content)
+            if amount < 100_000_000:
+                await ctx.send("withdrawal must be greater than 100,000,000 QSE")
+                return
+            result = await withdraw_qse(self, ctx, 1, Decimal(amount))
+            if result:
+                await ctx.send(result)
+                return
+        else:
+            return
+
+    @commands.command(name="top_wealth", help="Show the top 10 wealthiest users.")
+    async def top_wealth(self, ctx):
+        cursor = self.conn.cursor()
+        P3addrCursor = self.P3addrConn.cursor()
+
+        await ctx.message.delete()
+
+        # Get the top 10 wealthiest users, sorting them by total wealth (balance + stock value + ETF value + metal value)
+        cursor.execute("""
+            SELECT users.user_id,
+                   (users.balance + IFNULL(total_stock_value, 0) + IFNULL(total_etf_value, 0) + IFNULL(total_metal_value, 0)) AS total_wealth
+            FROM users
+            LEFT JOIN (
+                SELECT user_id, SUM(stocks.price * user_stocks.amount) AS total_stock_value
+                FROM user_stocks
+                LEFT JOIN stocks ON user_stocks.symbol = stocks.symbol
+                GROUP BY user_id
+            ) AS user_stock_data ON users.user_id = user_stock_data.user_id
+            LEFT JOIN (
+                SELECT user_id, SUM(etf_value * user_etfs.quantity) AS total_etf_value
+                FROM user_etfs
+                LEFT JOIN (
+                    SELECT etf_stocks.etf_id, SUM(stocks.price * etf_stocks.quantity) AS etf_value
+                    FROM etf_stocks
+                    LEFT JOIN stocks ON etf_stocks.symbol = stocks.symbol
+                    GROUP BY etf_stocks.etf_id
+                ) AS etf_data ON user_etfs.etf_id = etf_data.etf_id
+                GROUP BY user_id
+            ) AS user_etf_data ON users.user_id = user_etf_data.user_id
+            LEFT JOIN (
+                SELECT user_id, SUM(items.price * inventory.quantity) AS total_metal_value
+                FROM inventory
+                LEFT JOIN items ON inventory.item_id = items.item_id
+                WHERE items.item_name IN ('Copper', 'Platinum', 'Gold', 'Silver', 'Lithium')
+                GROUP BY user_id
+            ) AS user_metal_data ON users.user_id = user_metal_data.user_id
+            ORDER BY total_wealth DESC
+            LIMIT 10
+        """)
+
+        top_users = cursor.fetchall()
+
+        if not top_users:
+            await ctx.send("No users found.")
+            return
+
+        embed = discord.Embed(title="Top 10 Wealthiest Users", color=discord.Color.gold())
+
+        for user_id, total_wealth in top_users:
+            username = self.get_username(ctx, user_id)
+            vanity_address = get_vanity_address(self.P3addrConn, user_id)
+            P3Addr = vanity_address if vanity_address else generate_crypto_address(user_id)
+
+            # Format wealth in shorthand
+            wealth_shorthand = self.format_value(total_wealth)
+
+            embed.add_field(name=f"P3 Address", value=f"{P3Addr}\n({wealth_shorthand})", inline=False)
+
+        await ctx.send(embed=embed)
+

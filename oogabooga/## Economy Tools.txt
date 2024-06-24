@@ -1,0 +1,547 @@
+
+# Economy Tools
+
+## Begin Lottery
+    @commands.command(name="buy_tickets", help="Buy raffle tickets.")
+    async def buy_tickets(self, ctx, quantity: int):
+        await ctx.message.delete()
+        if quantity <= 0:
+            await ctx.send("The quantity of tickets to buy should be greater than 0.")
+            return
+
+        user_id = ctx.author.id
+        user_balance = get_user_balance(self.conn, user_id)
+        cost = quantity * ticketPrice
+
+        if user_balance < cost:
+            await ctx.send(f"{ctx.author.mention}, you don't have enough $QSE to buy {quantity} tickets. You need {cost} $QSE.")
+            return
+
+        # Calculate the tax amount based on dynamic factors
+        tax_percentage = self.calculate_tax_percentage(ctx, "buy_etf") # Custom function to determine the tax percentage based on quantity and cost
+        fee = cost * Decimal(tax_percentage)
+        total_cost = cost + fee
+
+
+        # Check if the user will have a negative balance after buying the tickets
+        if user_balance - total_cost < 0:
+            await ctx.send(f"{ctx.author.mention}, this transaction will result in a negative balance. Please buy a lower quantity.")
+            return
+
+        # Deduct the cost of tickets from the user's balance
+        await update_user_balance(self.conn, user_id, user_balance - total_cost)
+
+        ticket_data = await get_ticket_data(self.conn, user_id)
+
+        if ticket_data is None:
+            await update_ticket_data(self.conn, user_id, quantity, int(time.time()))
+        else:
+            ticket_quantity, _ = ticket_data
+            await update_ticket_data(self.conn, user_id, ticket_quantity + quantity, int(time.time()))
+
+        # Transfer the tax amount to the bot's address P3:03da907038
+        await update_user_balance(self.conn, get_user_id(self.P3addrConn, self.bot_address), get_user_balance(self.conn, get_user_id(self.P3addrConn, self.bot_address)) + fee)
+        await log_transfer(self, ledger_conn, ctx, "P3 Bot", self.bot_address, get_user_id(self.P3addrConn, self.bot_address), fee)
+        await ctx.send(f"{ctx.author.mention}, you have successfully bought {quantity} tickets.")
+
+
+# Lottery Tools
+
+    @commands.command(name="draw_winner", help="🎉 Draw a winner for the raffle! 🎉")
+    @is_allowed_user(930513222820331590, PBot)
+    async def draw_winner(self, ctx):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT user_id, quantity FROM raffle_tickets")
+        ticket_data = cursor.fetchall()
+
+        if not ticket_data:
+            await ctx.send("No tickets were sold. There is no winner.")
+            return
+
+        total_tickets = sum(quantity for _, quantity in ticket_data)
+        winner_ticket = random.randint(1, total_tickets)
+        accumulated_tickets = 0
+
+        for user_id, quantity in ticket_data:
+            accumulated_tickets += quantity
+            if accumulated_tickets >= winner_ticket:
+                winner = await self.bot.fetch_user(user_id)
+                if winner:
+                    channel = ctx.guild.get_channel(1162447728190693466)
+                    # Add a countdown before announcing the winner
+                    count = 10
+                    message = await ctx.send(f"🎉 Drawing winner in {count}... 🎉")
+                    for i in range(count, 0, -1):
+                        await message.edit(content=f"🎉 Drawing winner in {i}... 🎉")
+                        await asyncio.sleep(1)
+                    await ctx.send(f"🎉 The winner is {winner.mention}! Congratulations! 🎉 Please head over to {channel.mention} to claim your prize.")
+                else:
+                    await ctx.send(f"⚠️ Error.. Report to {channel.mention} ⚠️")
+                break
+
+
+    @commands.command(name="clear_tickets")
+    @is_allowed_user(930513222820331590, PBot)
+    async def clear_tickets(self, ctx):
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM raffle_tickets")
+        self.conn.commit()
+
+        await ctx.send(f"All raffle tickets have been deleted.")
+
+
+
+    @commands.command(name="my_tickets", help="Check your raffle tickets.")
+    async def my_tickets(self, ctx):
+        user_id = ctx.author.id
+        ticket_data = await get_ticket_data(self.conn, user_id)
+
+        if ticket_data is None:
+            await ctx.send(f"{ctx.author.mention}, you have no tickets.")
+        else:
+            ticket_quantity, _ = ticket_data
+            await ctx.send(f"{ctx.author.mention}, you have {ticket_quantity:,.0f} tickets.")
+
+
+
+## Begin Marketplace
+    @commands.command(name="marketplace", help="View the items available in the marketplace.")
+    async def view_marketplace(self, ctx):
+        cursor = self.conn.cursor()
+
+        # Fetch all items from the marketplace
+        cursor.execute("SELECT item_name, item_description, price, is_usable FROM items")
+        items_data = cursor.fetchall()
+
+        if not items_data:
+            await ctx.send("No items available in the marketplace.")
+            return
+
+        # Create and send an embed with the items' information
+        embed = discord.Embed(title="Marketplace", color=discord.Color.blue())
+
+        for item in items_data:
+            item_name = item[0]
+            item_description = item[1] or "No description available"
+            item_price = item[2]
+            is_usable = item[3]
+
+            result = await self.item_supply_info(ctx, item_name)
+            current_price, current_value, reserve_supply, circulating, total_supply = result
+
+            embed.add_field(name=item_name, value=f"Description: {item_description}\nPrice: {current_price} $QSE\nUsable: {'Yes' if is_usable else 'No'}", inline=False)
+
+        await ctx.send(embed=embed)
+
+
+    @commands.command(name="inventory", help="View your inventory.")
+    async def view_inventory(self, ctx):
+        user_id = ctx.author.id
+        cursor = self.conn.cursor()
+
+        # Fetch user's inventory
+        cursor.execute("""
+            SELECT items.item_name, items.item_description, inventory.quantity, items.price
+            FROM inventory
+            JOIN items ON inventory.item_id = items.item_id
+            WHERE user_id=?
+        """, (user_id,))
+        inventory_data = cursor.fetchall()
+
+        if not inventory_data:
+            await ctx.send(f"{ctx.author.mention}, your inventory is empty.")
+            return
+
+        # Create and send an embed with the user's inventory
+        embed = discord.Embed(title="Your Inventory", color=discord.Color.green())
+
+        total_value = 0  # Initialize total value
+
+        for item in inventory_data:
+            item_name = item[0]
+            item_description = item[1] or "No description available"
+            quantity = Decimal(item[2])
+            item_price = Decimal(item[3])  # Convert the item price to Decimal
+
+            result = await self.item_supply_info(ctx, item_name)
+            current_price, current_value, reserve_supply, circulating, total_supply = result
+
+            # Calculate the total value for the item
+            item_value = Decimal(current_price) * quantity
+
+            total_value += item_value  # Accumulate the total value
+
+            # Format the values with commas
+            formatted_quantity = "{:,}".format(quantity)
+            formatted_item_value = "{:,.2f}".format(item_value)
+
+            embed.add_field(name=item_name, value=f"Description: {item_description}\nQuantity: {formatted_quantity}\nValue: {formatted_item_value} $QSE", inline=False)
+
+        # Format the total inventory value with commas
+        formatted_total_value = "{:,.2f}".format(total_value)
+
+        # Add the total value of the inventory to the embed
+        embed.add_field(name="Total Inventory Value", value=f"{formatted_total_value} $QSE", inline=False)
+
+        await ctx.send(embed=embed)
+
+    @commands.command(name="initialize_dates", help="Initialize all users' dates to the default.")
+    async def initialize_dates(self, ctx):
+        try:
+            with self.get_cursor() as cursor:
+                cursor.execute("UPDATE item_usage SET timestamp = '2000-01-01 00:00:00'")
+            await ctx.send("All users' dates have been initialized to the default.")
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred: {str(e)}")
+
+
+    @commands.command(name="mine_metal")
+    @is_allowed_user(930513222820331590, PBot)
+    async def give_item(self, ctx, P3addr, item_name, quantity):
+
+        cursor = self.conn.cursor()
+        user_id = get_user_id(self.P3addrConn, P3addr)
+        # Check if the item exists in the marketplace
+        cursor.execute("SELECT item_id, price, is_usable FROM items WHERE item_name=?", (item_name,))
+        item_data = cursor.fetchone()
+
+        if item_data is None:
+            await ctx.send(f"{ctx.author.mention}, this item is not available in the marketplace.")
+            return
+
+        item_id, item_price, is_usable = item_data
+
+        # Update the user's inventory
+        try:
+            cursor.execute("""
+                INSERT INTO inventory (user_id, item_id, quantity)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, item_id) DO UPDATE SET quantity = quantity + ?
+            """, (user_id, item_id, quantity, quantity))
+        except sqlite3.Error as e:
+            await ctx.send(f"{ctx.author.mention}, an error occurred while updating user inventory. Error: {str(e)}")
+            return
+
+
+
+
+
+    @commands.command(name="send_item_reserve")
+    @is_allowed_user(930513222820331590, PBot)
+    async def send_item_reserve(self, ctx, P3addr, item_name, quantity):
+        quantity = int(quantity)
+        cursor = self.conn.cursor()
+        recv_id = get_user_id(self.P3addrConn, P3addr)
+        send_id = PBot
+        # Check if the item exists in the marketplace
+        cursor.execute("SELECT item_id, price, is_usable FROM items WHERE item_name=?", (item_name,))
+        item_data = cursor.fetchone()
+
+        if item_data is None:
+            await ctx.send(f"{ctx.author.mention}, this item is not available in the marketplace.")
+            return
+
+        item_id, item_price, is_usable = item_data
+
+        # Check if the user has enough quantity of the item to sell
+        cursor.execute("SELECT quantity FROM inventory WHERE user_id=? AND item_id=?", (send_id, item_id))
+        current_holding = cursor.fetchone()
+
+        if current_holding is None or current_holding[0] < quantity:
+            await ctx.send(f"{ctx.author.mention}, you do not have enough {item_name} in your inventory to sell.")
+            return
+
+        # Update user's inventory
+        try:
+            cursor.execute("UPDATE inventory SET quantity = quantity - ? WHERE user_id = ? AND item_id = ?", (quantity, send_id, item_id))
+        except sqlite3.Error as e:
+            await ctx.send(f"{ctx.author.mention}, an error occurred while updating user inventory. Error: {str(e)}")
+            return
+
+        # Update the user's inventory
+        try:
+            cursor.execute("""
+                INSERT INTO inventory (user_id, item_id, quantity)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, item_id) DO UPDATE SET quantity = quantity + ?
+            """, (recv_id, item_id, quantity, quantity))
+        except sqlite3.Error as e:
+            await ctx.send(f"{ctx.author.mention}, an error occurred while updating user inventory. Error: {str(e)}")
+            return
+
+
+
+    @commands.command(name="send_item")
+    @is_allowed_user(930513222820331590, PBot)
+    async def send_item(self, ctx, P3addr, item_name, quantity):
+        quantity = int(quantity)
+        cursor = self.conn.cursor()
+        recv_id = get_user_id(self.P3addrConn, P3addr)
+        send_id = ctx.author.id
+        # Check if the item exists in the marketplace
+        cursor.execute("SELECT item_id, price, is_usable FROM items WHERE item_name=?", (item_name,))
+        item_data = cursor.fetchone()
+
+        if item_data is None:
+            await ctx.send(f"{ctx.author.mention}, this item is not available in the marketplace.")
+            return
+
+        item_id, item_price, is_usable = item_data
+
+        # Check if the user has enough quantity of the item to sell
+        cursor.execute("SELECT quantity FROM inventory WHERE user_id=? AND item_id=?", (send_id, item_id))
+        current_holding = cursor.fetchone()
+
+        if current_holding is None or current_holding[0] < quantity:
+            await ctx.send(f"{ctx.author.mention}, you do not have enough {item_name} in your inventory to sell.")
+            return
+
+        # Update user's inventory
+        try:
+            cursor.execute("UPDATE inventory SET quantity = quantity - ? WHERE user_id = ? AND item_id = ?", (quantity, send_id, item_id))
+        except sqlite3.Error as e:
+            await ctx.send(f"{ctx.author.mention}, an error occurred while updating user inventory. Error: {str(e)}")
+            return
+
+        # Update the user's inventory
+        try:
+            cursor.execute("""
+                INSERT INTO inventory (user_id, item_id, quantity)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id, item_id) DO UPDATE SET quantity = quantity + ?
+            """, (recv_id, item_id, quantity, quantity))
+        except sqlite3.Error as e:
+            await ctx.send(f"{ctx.author.mention}, an error occurred while updating user inventory. Error: {str(e)}")
+            return
+
+    @commands.command(name="item_supply_info")
+    async def item_supply_info(self, ctx, item_name):
+        cursor = self.conn.cursor()
+        addr_cursor = self.P3addrConn.cursor()
+
+        # Get all user IDs from P3addr.db
+        user_ids_result = addr_cursor.execute("SELECT DISTINCT user_id FROM user_addresses").fetchall()
+        all_user_ids = [user_id for user_id, in user_ids_result]
+
+        # Check if the item exists in the marketplace
+        cursor.execute("SELECT item_id, price FROM items WHERE item_name=?", (item_name,))
+        item_data = cursor.fetchone()
+
+        if item_data is None:
+            await ctx.send(f"{ctx.author.mention}, this item is not available in the marketplace.")
+            return
+
+        item_id, item_price = item_data
+        total_supply = 0
+
+        for user_id in all_user_ids:
+            # Check if the user has enough quantity of the item to sell
+            cursor.execute("SELECT quantity FROM inventory WHERE user_id=? AND item_id=?", (user_id, item_id))
+            current_holding = cursor.fetchone()
+
+            if current_holding is not None:
+                total_supply += current_holding[0]
+
+        # Check quantity for the PBot user
+        cursor.execute("SELECT quantity FROM inventory WHERE user_id=? AND item_id=?", (PBot, item_id))
+        current_holding = cursor.fetchone()
+
+        if current_holding is not None:
+            reserve_supply = current_holding[0]
+            avbl = reserve_supply
+            circulating = total_supply - avbl
+            iMC = total_supply * item_price
+            current_price = (iMC / avbl)
+            current_value = circulating * current_price
+            return current_price, current_value, reserve_supply, circulating, total_supply
+        else:
+            await ctx.send(f"Error fetching data for {item_name}.")
+
+
+    @commands.command(name="buy_item", help="Buy an item from the marketplace.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def buy_item(self, ctx, item_name: str, quantity: int):
+        await ctx.send(f"{item_name} is not available at this time")
+        return
+        if item_name in ["FireStarter", "MarketBadge"]:
+            await ctx.send(f"{item_name} is not available at this time")
+            return
+        current_timestamp = datetime.utcnow()
+        user_id = ctx.author.id
+        P3addrConn = sqlite3.connect("P3addr.db")
+        P3addr = get_p3_address(P3addrConn, user_id)
+
+        color = discord.Color.green()
+        embed = discord.Embed(title=f"Item Transaction Processing", color=color)
+        embed.add_field(name="Address:", value=f"{P3addr}", inline=False)
+        embed.add_field(name="Item:", value=f"{item_name}", inline=False)
+        embed.add_field(name="Amount:", value=f"{quantity:,.2f}", inline=False)
+#        embed.add_field(name="Value:", value=f"{etf_value:,.2f} $QSE", inline=False)
+        embed.set_footer(text=f"Timestamp: {current_timestamp}")
+
+        await ctx.send(embed=embed)
+        cursor = self.conn.cursor()
+
+        result = await self.item_supply_info(ctx, item_name)
+        current_price, current_value, reserve_supply, circulating, total_supply = result
+
+
+
+        # Calculate the total cost
+        total_cost = Decimal(current_price) * Decimal(quantity)
+
+        # Calculate the tax amount based on dynamic factors
+        tax_percentage = self.calculate_tax_percentage(ctx, "buy_etf")  # Custom function to determine the tax percentage based on quantity and cost
+        tax_amount = Decimal(total_cost) * Decimal(tax_percentage)
+
+        # Check if the user has enough balance to buy the items
+        current_balance = get_user_balance(self.conn, user_id)
+
+        if total_cost + tax_amount > current_balance:
+            await ctx.send(f"{ctx.author.mention}, you do not have enough $QSE to buy these items.")
+            return
+
+        new_balance = current_balance - (total_cost + tax_amount)
+
+        # Update the user's balance
+        try:
+            P3addrConn = sqlite3.connect("P3addr.db")
+            PBotAddr = get_p3_address(P3addrConn, PBot)
+            await self.give_addr(ctx, PBotAddr, (int(total_cost) + int(tax_amount)), False)
+        except ValueError as e:
+            await ctx.send(f"{ctx.author.mention}, an error occurred while updating the user balance. Error: {str(e)}")
+            return
+        try:
+            await self.send_item_reserve(ctx, get_p3_address(self.P3addrConn, ctx.author.id), item_name, quantity)
+
+        except sqlite3.Error as e:
+            await ctx.send(f"{ctx.author.mention}, an error occurred while updating user inventory. Error: {str(e)}")
+            return
+
+
+        await log_transfer(self, ledger_conn, ctx, "P3 Bot", self.bot_address, get_user_id(self.P3addrConn, self.bot_address), tax_amount)
+        await log_item_transaction(self.conn, ctx, "Buy", item_name, quantity, total_cost, tax_amount, new_balance)
+
+
+
+
+        current_timestamp = datetime.utcnow()
+        user_id = ctx.author.id
+        P3addrConn = sqlite3.connect("P3addr.db")
+        P3addr = get_p3_address(P3addrConn, user_id)
+
+        color = discord.Color.green()
+        embed = discord.Embed(title=f"Item Transaction Completed", color=color)
+        embed.add_field(name="Address:", value=f"{P3addr}", inline=False)
+        embed.add_field(name="Item:", value=f"{item_name}", inline=False)
+        embed.add_field(name="Amount:", value=f"{quantity:,.2f}", inline=False)
+        embed.add_field(name="Value:", value=f"{total_cost:,.2f} $QSE", inline=False)
+        embed.add_field(name="Gas:", value=f"{tax_amount:,.2f} $QSE", inline=False)
+
+        embed.set_footer(text=f"Timestamp: {current_timestamp}")
+
+        await ctx.send(embed=embed)
+
+
+        elapsed_time = timeit.default_timer() - self.buy_item_timer_start
+        self.buy_item_avg.append(elapsed_time)
+        avg_time = sum(self.buy_item_avg) / len(self.buy_item_avg)
+        gas = self.calculate_tax_percentage(ctx, "sell_etf") * 100
+
+        print(f"""
+        **Metal Reserve Debug**
+        Metal: {item_name}
+        Price: {current_price:,.2f}
+        Quantity: {quantity:,}
+        Transaction Time: {elapsed_time:.2f} seconds
+        Average Time: {avg_time:.2f} seconds
+        Gas Fee: {gas:,.4f}
+
+        """)
+
+    @commands.command(name="sell_item", help="Sell an item from your inventory.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def sell_item(self, ctx, item_name: str, quantity: int):
+        await ctx.message.delete()
+        current_timestamp = datetime.utcnow()
+        user_id = ctx.author.id
+        P3addrConn = sqlite3.connect("P3addr.db")
+        P3addr = get_p3_address(P3addrConn, user_id)
+
+        color = discord.Color.red()
+        embed = discord.Embed(title=f"Item Transaction Processing", color=color)
+        embed.add_field(name="Address:", value=f"{P3addr}", inline=False)
+        embed.add_field(name="Item:", value=f"{item_name}", inline=False)
+        embed.add_field(name="Amount:", value=f"{quantity:,.2f}", inline=False)
+#        embed.add_field(name="Value:", value=f"{etf_value:,.2f} $QSE", inline=False)
+        embed.set_footer(text=f"Timestamp: {current_timestamp}")
+
+        await ctx.send(embed=embed)
+        member = ctx.guild.get_member(user_id)
+        cursor = self.conn.cursor()
+
+        # Check if the item exists in the marketplace
+        cursor.execute("SELECT item_id, price FROM items WHERE item_name=?", (item_name,))
+        item_data = cursor.fetchone()
+
+        if item_data is None:
+            await ctx.send(f"{ctx.author.mention}, this item is not available in the marketplace.")
+            return
+
+        item_id, item_price = item_data
+
+        # Check if the user has enough quantity of the item to sell
+        cursor.execute("SELECT quantity FROM inventory WHERE user_id=? AND item_id=?", (user_id, item_id))
+        current_holding = cursor.fetchone()
+
+        if current_holding is None or current_holding[0] < quantity:
+            await ctx.send(f"{ctx.author.mention}, you do not have enough {item_name} in your inventory to sell.")
+            return
+
+        # Calculate the total sale amount
+        total_sale_amount = Decimal(item_price) * Decimal(quantity)
+        # Calculate the tax amount based on dynamic factors
+        tax_percentage = self.calculate_tax_percentage(ctx, "sell_etf")  # Custom function to determine the tax percentage based on quantity and cost
+        fee = total_sale_amount * Decimal(tax_percentage)
+        total_sale_amount = total_sale_amount - fee
+        total_cost = total_sale_amount
+        tax_amount = fee
+
+        # Update user's balance
+        current_balance = get_user_balance(self.conn, user_id)
+        new_balance = current_balance + total_sale_amount
+
+        try:
+            await self.send_from_reserve(ctx, user_id, total_sale_amount)
+        except ValueError as e:
+            await ctx.send(f"{ctx.author.mention}, an error occurred while updating the user balance. Error: {str(e)}")
+            return
+
+        # Update user's inventory
+        try:
+            cursor.execute("UPDATE inventory SET quantity = quantity - ? WHERE user_id = ? AND item_id = ?", (quantity, user_id, item_id))
+        except sqlite3.Error as e:
+            await ctx.send(f"{ctx.author.mention}, an error occurred while updating user inventory. Error: {str(e)}")
+            return
+
+        # Transfer the tax amount to the bot's address P3:03da907038
+        await log_transfer(self, ledger_conn, ctx, "P3 Bot", self.bot_address, get_user_id(self.P3addrConn, self.bot_address), tax_amount)
+        await log_item_transaction(self.conn, ctx, "Sell", item_name, quantity, total_sale_amount, Decimal(fee), new_balance)
+        self.conn.commit()
+
+        current_timestamp = datetime.utcnow()
+        user_id = ctx.author.id
+        P3addrConn = sqlite3.connect("P3addr.db")
+        P3addr = get_p3_address(P3addrConn, user_id)
+
+        color = discord.Color.red()
+        embed = discord.Embed(title=f"Item Transaction Completed", color=color)
+        embed.add_field(name="Address:", value=f"{P3addr}", inline=False)
+        embed.add_field(name="Item:", value=f"{item_name}", inline=False)
+        embed.add_field(name="Amount:", value=f"{quantity:,.2f}", inline=False)
+        embed.add_field(name="Value:", value=f"{total_cost:,.2f} $QSE", inline=False)
+        embed.add_field(name="Gas:", value=f"{tax_amount:,.2f} $QSE", inline=False)
+        embed.set_footer(text=f"Timestamp: {current_timestamp}")
+
+        await ctx.send(embed=embed)
+

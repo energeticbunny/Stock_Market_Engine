@@ -1,0 +1,406 @@
+ # Circuit Breaker Config
+        self.is_halted = False
+        self.is_halted_order = False
+        self.is_paused = False
+        self.is_long_order = False
+        self.contract_pool = []
+
+        self.market_circuit_breaker =  True
+        self.stock_circuit_breaker = True
+
+        self.not_trading = []
+        self.maintenance = ['secureharbor', 'goldtoken', 'p3:stable']
+        self.stock_monitor = defaultdict(list)
+#        self.ceo_stocks = [("partyscene", 607050637292601354), ("p3:bank", 930513222820331590), ("savage", 1147507029494202461)]
+        self.ceo_stocks = {
+            607050637292601354: ["partyscene"],
+            1147507029494202461: ["savage", "citizen", "xfinichi", "nonsense", "singlesoon"],
+            930513222820331590: ["p3:bank"]
+            # Add more entries as needed
+        }
+
+        self.last_market_value = 0.0
+
+        self.market_timeout = 300
+        self.market_limit = 10
+        self.stock_timeout = 300
+        self.stock_limit = 100
+
+        self.market_halts = 0
+        self.stock_halts = 0
+
+
+        self.cities = ["StellarHub", "TechnoMetra", "Quantumopolis", "CryptoVista"]
+        self.city_config = {
+            "StellarHub": {"buy_margin": 0.02, "sell_margin": 0.02, "tax_rate": 0.05},
+            "TechnoMetra": {"buy_margin": 0.01, "sell_margin": 0.01, "tax_rate": 0.06},
+            "Quantumopolis": {"buy_margin": 0.015, "sell_margin": 0.015, "tax_rate": 0.04},
+            "CryptoVista": {"buy_margin": 0.025, "sell_margin": 0.025, "tax_rate": 0.07}
+        }
+        self.safe_city = "StellarHub"
+        self.city_ids = {
+            "StellarHub": 1224458697728593962,
+            "TechnoMetra": 1224461917448437892,
+            "Quantumopolis": 1224463766956015670,
+            "CryptoVista": 1224465106835083348
+        }
+        self.etfs = ["1", "2", "3", "4", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"]
+        self.metals = ['Gold', 'Lithium', 'Silver', 'Copper', 'Platinum']
+
+        self.UpDownPer = 250
+        self.UpDownPerRange = 10 / 100.0
+        self.blacklisted = []
+
+
+
+    async def is_trading_halted(self):
+        if self.is_halted == True:
+            return True
+        else:
+            return False
+
+
+    async def is_trading_halted_stock(self, stock: str):
+        halted_assets = self.not_trading + self.maintenance
+        for i in halted_assets:
+            if i == stock.lower():
+                return True
+        return False
+
+
+    def is_staking_qse_genesis(self, user_id):
+        try:
+            cursor = self.conn.cursor()
+
+            # Check if the user is staking a QSE Genesis NFT
+            cursor.execute("SELECT COUNT(*) FROM user_stakes WHERE user_id=? AND nft='qse-genesis'", (user_id,))
+            count = cursor.fetchone()[0]
+
+            return count > 0
+
+        except sqlite3.Error as e:
+            print(f"An error occurred: {e}")
+            return False
+
+    def update_average_time(self, transaction_type: str, new_time: float):
+        # Add the new time to the corresponding list
+        if transaction_type == "buy_stock":
+            self.buy_stock_avg.append(new_time)
+        elif transaction_type == "sell_stock":
+            self.sell_stock_avg.append(new_time)
+        elif transaction_type == "buy_etf":
+            self.buy_etf_avg.append(new_time)
+        elif transaction_type == "sell_etf":
+            self.sell_etf_avg.append(new_time)
+        elif transaction_type == "casino":
+            self.casino_avg.append(new_time)
+        elif transaction_type == "reserve":
+            self.reserve_avg.append(new_time)
+        elif transaction_type == "buy_item":
+            self.buy_item_avg.append(new_time)
+        elif transaction_type == "sell_item":
+            self.sell_item_avg.append(new_time)
+        elif transaction_type == "transfer":
+            self.transfer_avg.append(new_time)
+        elif transaction_type == "tax_command":
+            self.tax_command_avg.append(new_time)
+
+    def calculate_average_time(self, transaction_type: str) -> float:
+        # Combine all lists into one
+        all_times = (
+            self.buy_stock_avg +
+            self.sell_stock_avg +
+            self.buy_etf_avg +
+            self.sell_etf_avg +
+            self.casino_avg +
+            self.reserve_avg +
+            self.buy_item_avg +
+            self.sell_item_avg +
+            self.transfer_avg +
+            self.tax_command_avg
+            )
+
+
+#        # Filter times based on transaction type
+#        specific_times = getattr(self, f"{transaction_type}_avg", [])
+
+        # Calculate and return the average time for the specific transaction type
+#        return sum(specific_times) / len(specific_times) if specific_times else 0.0
+
+
+        # Calculate and return the average time
+        return sum(all_times) / len(all_times) if all_times else 0.0
+
+
+    def calculate_average_time_type(self, transaction_type: str) -> float:
+        # Combine all lists into one
+        all_times = (
+            self.buy_stock_avg +
+            self.sell_stock_avg +
+            self.buy_etf_avg +
+            self.sell_etf_avg +
+            self.casino_avg +
+            self.reserve_avg +
+            self.buy_item_avg +
+            self.sell_item_avg +
+            self.transfer_avg +
+            self.tax_command_avg
+            )
+
+
+#        # Filter times based on transaction type
+        specific_times = getattr(self, f"{transaction_type}_avg", [])
+
+        # Calculate and return the average time for the specific transaction type
+        return sum(specific_times) / len(specific_times) if specific_times else 0.0
+
+    def calculate_tax_percentage(self, ctx, transaction_type: str) -> float:
+        is_staking_qse_genesis = self.is_staking_qse_genesis(ctx.author.id)
+        tax_rate = self.calculate_average_time(transaction_type)
+
+        # Check if the user is staking_qse_genesis and apply a 10% discount
+        if is_staking_qse_genesis:
+            discount_percentage = 10
+            tax_rate -= (tax_rate * discount_percentage / 100)
+
+        # If tax_rate is still 0.0, set it to the default rate
+        if tax_rate == 0.0:
+            tax_rate = 1.75 / 100
+        else:
+            tax_rate /= 50  # Dividing by 10, assuming tax_rate is a percentage
+
+        # Ensure tax_rate doesn't exceed 30%
+        tax_rate = min(tax_rate, 0.30)
+
+        return tax_rate
+
+    @commands.command(name="city_info", help="Displays current margins and tax rate for each city.")
+    async def city_config_info(self, ctx):
+        embed = discord.Embed(
+            title="City Configuration Information",
+            description="Current margins and tax rate for each city:",
+            color=discord.Color.green()
+        )
+
+        for city, config in self.city_config.items():
+            buy_margin = config["buy_margin"]
+            sell_margin = config["sell_margin"]
+            tax_rate = config["tax_rate"]
+
+            embed.add_field(
+                name=city,
+                value=f"Buy Margin: {buy_margin:.2%}\nSell Margin: {sell_margin:.2%}\nTax Rate: {tax_rate:.2%}",
+                inline=False
+            )
+
+        await ctx.send(embed=embed)
+
+    @commands.command(name="stock_prices_by_city", help="Display stock prices for a symbol in every city")
+    async def stock_prices_by_city(self, ctx, symbol: str):
+        # Create an embed to display the stock prices
+        embed = discord.Embed(
+            title=f"Stock Prices for {symbol} in Different Cities 🏙️",
+            color=discord.Color.blue()
+        )
+
+        for city in self.cities:
+            # Fetch buy and sell prices for the stock in the current city
+            buy_price, sell_price = await get_city_prices_for_stock(self, ctx, symbol, city)
+
+            if buy_price is not None and sell_price is not None:
+                # Add buy and sell prices to the embed
+                embed.add_field(name=f"\n{city} Buy Price", value=f"${buy_price:.2f}", inline=True)
+                embed.add_field(name=f"{city} Sell Price", value=f"${sell_price:.2f}\n------------------", inline=True)
+            else:
+                embed.add_field(name=f"{city} Prices", value="Not available", inline=True)
+
+        await ctx.send(embed=embed)
+
+    @commands.command(name="get_stock_daily")
+    async def get_stock_daily(self, ctx, stock):
+        opening_price, current_price, price_change, percentage_change, prev_price_change, prev_percentage_change = await get_stock_price_change(self, ctx, stock, interval='daily')
+
+        print(f"""
+        Stock: {stock}
+        Price: {current_price:,.2f} QSE
+        Open: {opening_price:,.2f} QSE
+        Daily: {price_change:,.2f}({percentage_change:,.4f})%
+        After Hours: {prev_price_change:,.2f}({prev_percentage_change:,.4f})%
+        """)
+
+    @commands.command(name="transaction_metrics", help="Show average transaction speeds for each type.")
+    async def show_transaction_metrics(self, ctx):
+        transaction_types = [
+            "buy_stock",
+            "sell_stock",
+            "buy_etf",
+            "sell_etf",
+            "casino",
+            "reserve",
+            "buy_item",
+            "sell_item",
+            "transfer",
+            "tax_command"
+        ]
+
+        gas = self.calculate_tax_percentage(ctx, "sell_etf") * 100
+        embed = Embed(title="Transaction Metrics", color=discord.Color.blue())
+
+        total_transactions = 0
+        total_average_time = 0.0
+
+        for transaction_type in sorted(transaction_types, key=lambda x: self.calculate_average_time(x), reverse=True):
+            avg_time = self.calculate_average_time_type(transaction_type)
+            transaction_count = len(getattr(self, f"{transaction_type}_avg", []))
+            transaction_count = max(transaction_count - 1, 0)  # Ensure non-negative count
+            if transaction_count == 0:
+                avg_time = 0.0
+
+            total_transactions += transaction_count
+            total_average_time += avg_time * transaction_count
+
+            if transaction_count != 0:
+
+                embed.add_field(
+                    name=transaction_type.capitalize(),
+                    value=f"Average Time: {avg_time:.5f}s\nTransaction Count: {(transaction_count + 1):,}",
+                    inline=False
+                )
+
+        combined_average = total_average_time / total_transactions if total_transactions > 0 else 0.0
+
+        if total_transactions != 0:
+            total_transactions += 1
+
+        embed.add_field(name="Combined Average Time:", value=f"{combined_average:.5f}s", inline=False)
+        embed.add_field(name="Total Transactions:", value=f"{total_transactions:,}", inline=False)
+        embed.add_field(name="Gas Fee:", value=f"{gas:,.2f}%")
+        embed.set_footer(text="Combined average time is calculated across all transaction types.")
+
+        await ctx.send(embed=embed)
+
+
+
+
+    @tasks.loop(hours=1)  # Run every hour
+    async def reset_stock_limit_all(self):
+        # Connect to the P3addr.db database
+        p3addr_conn = sqlite3.connect("P3addr.db")
+
+        # Connect to the currency_system database
+        currency_conn = sqlite3.connect("currency_system.db")
+        cursor = currency_conn.cursor()
+
+        try:
+            # Get all user IDs with daily stock buy records
+            cursor.execute("""
+                SELECT DISTINCT user_id
+                FROM user_daily_buys
+                WHERE timestamp >= date('now', '-1 day')
+            """)
+            users_with_records = cursor.fetchall()
+
+            if users_with_records:
+                for user_id, in users_with_records:
+                    # Reset daily stock buy records for each user
+                    cursor.execute("""
+                        DELETE FROM user_daily_buys
+                        WHERE user_id=?
+                    """, (user_id,))
+                    currency_conn.commit()
+
+                channel_id = 1164250215239385129  # Replace with the desired channel ID
+                channel = self.bot.get_channel(channel_id)
+                await channel.send("Successfully reset daily stock buy limits for all users.")
+            else:
+                channel_id = 1164250215239385129  # Replace with the desired channel ID
+                channel = self.bot.get_channel(channel_id)
+        except sqlite3.Error as e:
+            channel_id = 1164250215239385129 # Replace with the desired channel ID
+            channel = self.bot.get_channel(channel_id)
+            await channel.send(f"An error occurred: {str(e)} @Moderator")
+        finally:
+            # Close the database connections
+            p3addr_conn.close()
+            currency_conn.close()
+
+    @commands.command(name="manual_reset_stock_limit", help="Manually reset daily stock buy limits for all users.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def manual_reset_stock_limit(self, ctx):
+        # Manually trigger the loop
+        self.reset_stock_limit_all.restart()
+        await ctx.send("Manual reset of daily stock buy limits initiated.")
+
+
+    def get_user_stock_amount(self, user_id, stock_name):
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT amount FROM user_stocks WHERE user_id=? AND symbol=?", (user_id, stock_name))
+        result = cursor.fetchone()
+        return int(result[0]) if result else 0
+
+    def get_available_stocks(self):
+        conn = sqlite3.connect("currency_system.db")
+        cursor = conn.cursor()
+        cursor.execute("SELECT symbol FROM stocks")
+        stocks = cursor.fetchall()
+        conn.close()
+        return [stock[0] for stock in stocks]
+
+
+    @commands.command(name="check_stock_supply", help="Check and update stock supply.")
+    async def check_stock_supply(self, ctx):
+        cursor = self.conn.cursor()
+
+        # Get the total supply for each stock
+        cursor.execute("SELECT symbol, available FROM stocks")
+        stocks = cursor.fetchall()
+
+        for stock in stocks:
+            symbol, available = stock
+            total_supply, available = await get_supply_info(self, ctx, symbol)
+
+            # Get the total amount held by users
+            cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM user_stocks WHERE symbol=?", (symbol,))
+            total_user_amount = cursor.fetchone()[0]
+
+            # Calculate the total supply
+            total_supply = total_user_amount + available
+
+            # Update the total supply in the stocks table
+            cursor.execute("UPDATE stocks SET total_supply=? WHERE symbol=?", (str(total_supply), symbol))
+            cursor.execute("UPDATE stocks SET available=? WHERE symbol=?", (str(available), symbol))
+
+        self.conn.commit()
+        await ctx.send("Stock supply checked and updated.")
+
+
+    @commands.command(name='test_stock_info')
+    async def test_stock_info(self, ctx, symbol):
+        ReserveHoldings = self.get_user_stock_amount(PBot, symbol)
+        total_supply, locked = await get_supply_info(self, ctx, symbol)
+        escrow_supply = await get_total_shares_in_orders(self, symbol)
+        market = ReserveHoldings - escrow_supply
+        circulating = total_supply - ReserveHoldings - escrow_supply - locked
+
+
+        print(f"""
+        PBot = {ReserveHoldings:,.0f}
+        Locked = {locked:,.0f}
+        total = {total_supply:,.0f}
+        escrow = {escrow_supply:,.0f}
+        market = {market:,.0f}
+        circulating = {circulating:,.0f}
+
+
+        """)
+
+
+    @commands.command(name='servers', help='Check how many servers the bot is in.')
+    async def servers(self, ctx):
+        server_list = "\n".join([guild.name for guild in self.bot.guilds])
+        server_count = len(self.bot.guilds)
+
+        if server_count == 0:
+            await ctx.send("I am not in any servers.")
+        else:
+            await ctx.send(f"I am in {server_count} server(s):\n{server_list}")

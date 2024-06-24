@@ -1,0 +1,992 @@
+## Games
+
+
+
+
+##
+
+
+
+
+
+    @commands.command(name="mint_stock", help="Set the total and available supply for a specific stock.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def mint_stock_supply(self, ctx, stock_name: str, mint: int, verbose: bool = True):
+        cursor = self.conn.cursor()
+
+        try:
+            # Check if the stock exists
+            cursor.execute("SELECT * FROM stocks WHERE symbol=?", (stock_name,))
+            stock = cursor.fetchone()
+            if stock is None:
+                await ctx.send(f"This stock '{stock_name}' does not exist.")
+                return
+            old_price = await get_stock_price(self, ctx, stock_name)
+            result = await get_supply_stats(self, ctx, stock_name)
+            reserve, total, locked, escrow, market, circulating = result
+            new_market = locked + mint
+            new_total = total + mint
+
+
+            if reserve is not None:
+                if reserve < 0:
+                    await ctx.send("Invalid available supply value. The available supply must be non-negative.")
+                    return
+                cursor.execute("UPDATE stocks SET available = ? WHERE symbol = ?", (new_market, stock_name))
+
+
+
+            self.conn.commit()
+            await self.buy_stock_for_bot(ctx, stock_name, mint)
+            current_price = await get_stock_price(self, ctx, stock_name)
+            if verbose:
+                await ctx.send(f"Minted {mint:,.0f} to {stock_name}\n\nPrice: {old_price:,.2f} -> {current_price:,.2f}\n\n{market:,.0f}->{new_market:,.0f}\n{total:,.0f}->{new_total:,.0f}")
+#            print(f"Minted {mint:,.0f} to {stock_name}\n\nPrice: {old_price:,.2f} -> {current_price:,.2f}\n\n{market:,.0f}->{new_market:,.0f}\n{total:,.0f}->{new_total:,.0f}")
+            print_minted_details(mint, stock_name, old_price, current_price, market, new_market, total, new_total)
+
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while updating the stock supply. Error: {str(e)}")
+
+    @commands.command(name="mint_stable", help="Set the total and available supply for a specific stock.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def mint_stock_stable(self, ctx, stock_name: str, mint: int, verbose: bool = True):
+        cursor = self.conn.cursor()
+
+        try:
+            # Check if the stock exists
+            cursor.execute("SELECT * FROM stocks WHERE symbol=?", (stock_name,))
+            stock = cursor.fetchone()
+            if stock is None:
+                await ctx.send(f"This stock '{stock_name}' does not exist.")
+                return
+            old_price = await get_stock_price(self, ctx, stock_name)
+            result = await get_supply_stats(self, ctx, stock_name)
+            reserve, total, locked, escrow, market, circulating = result
+            new_market = locked + mint
+            new_total = total + mint
+
+
+            if reserve is not None:
+                if reserve < 0:
+                    await ctx.send("Invalid available supply value. The available supply must be non-negative.")
+                    return
+                cursor.execute("UPDATE stocks SET available = ? WHERE symbol = ?", (new_market, stock_name))
+
+
+
+            self.conn.commit()
+            await self.buy_stock_for_bot(ctx, stock_name, mint)
+            current_price = await get_stock_price(self, ctx, stock_name)
+            if verbose:
+                await ctx.send(f"Minted {mint:,.0f} to {stock_name}\n\nPrice: {old_price:,.2f} -> {current_price:,.2f}\n\n{market:,.0f}->{new_market:,.0f}\n{total:,.0f}->{new_total:,.0f}")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while updating the stock supply. Error: {str(e)}")
+
+
+    @commands.command(name="burn_stock", help="Set the total and available supply for a specific stock.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def burn_stock_supply(self, ctx, stock_name: str, burn: int, verbose: bool = True):
+        cursor = self.conn.cursor()
+
+        try:
+            # Check if the stock exists
+            cursor.execute("SELECT * FROM stocks WHERE symbol=?", (stock_name,))
+            stock = cursor.fetchone()
+            if stock is None:
+                await ctx.send(f"This stock '{stock_name}' does not exist.")
+                return
+
+            result = await get_supply_stats(self, ctx, stock_name)
+            reserve, total, locked, escrow, market, circulating = result
+            new_market = market - burn
+            new_total = total - burn
+            await self.sell_stock_for_bot(ctx, stock_name, burn)
+
+
+            if reserve is not None:
+                if reserve < 0:
+                    await ctx.send("Invalid available supply value. The available supply must be non-negative.")
+                    return
+                cursor.execute("UPDATE stocks SET available = ? WHERE symbol = ?", (0, stock_name))
+
+            self.conn.commit()
+            if verbose:
+#                await self.sell_stock_for_bot(ctx, stock_name, burn)
+                await ctx.send(f"Burned {burn:,.0f} to {stock_name}\n\n{market:,.0f}->{new_market:,.0f}\n{total:,.0f}->{new_total:,.0f}")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while updating the stock supply. Error: {str(e)}")
+
+    @commands.command(name="set_stock_supply", help="Set the total and available supply for a specific stock.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def set_stock_supply(self, ctx, stock_name: str, total_supply: typing.Optional[int] = None, available_supply: typing.Optional[int] = None):
+        cursor = self.conn.cursor()
+
+        try:
+            # Check if the stock exists
+            cursor.execute("SELECT * FROM stocks WHERE symbol=?", (stock_name,))
+            stock = cursor.fetchone()
+            if stock is None:
+                await ctx.send(f"This stock '{stock_name}' does not exist.")
+                return
+
+            if total_supply is not None:
+                if total_supply < 0:
+                    await ctx.send("Invalid total supply value. The total supply must be non-negative.")
+                    return
+                cursor.execute("UPDATE stocks SET total_supply = ? WHERE symbol = ?", (total_supply, stock_name))
+
+            if available_supply is not None:
+                if available_supply < 0:
+                    await ctx.send("Invalid available supply value. The available supply must be non-negative.")
+                    return
+                cursor.execute("UPDATE stocks SET available = ? WHERE symbol = ?", (available_supply, stock_name))
+
+            self.conn.commit()
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while updating the stock supply. Error: {str(e)}")
+
+    @commands.command(name="set_all_stock_supplies", help="Set the total and available supply for all stocks to random values within a specified range.")
+    @is_allowed_user(930513222820331590, PBot)
+    async def set_all_stock_supplies(self, ctx):
+        cursor = self.conn.cursor()
+
+        try:
+            # Get all stock symbols
+            cursor.execute("SELECT symbol FROM stocks")
+            stocks = [row[0] for row in cursor.fetchall()]
+
+            # Update the supplies of all stocks
+            for stock_name in stocks:
+                total_supply = random.randint(100000000, 25000000000)
+                available_supply = total_supply
+                cursor.execute("UPDATE stocks SET total_supply = ?, available = ? WHERE symbol = ?", (total_supply, available_supply, stock_name))
+
+            self.conn.commit()
+            await ctx.send("Total and available supplies for all stocks have been updated successfully.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while updating stock supplies: {str(e)}")
+
+    @commands.command(name='roulette', help='Play roulette. Choose a color (red/black/green) or a number (0-36) or "even"/"odd" and your bet amount.')
+    @is_allowed_user(930513222820331590)
+    async def roulette(self, ctx, choice: str, bet: int):
+        self.casino_timer_start = timeit.default_timer()
+        user_id = ctx.author.id
+        current_balance = get_user_balance(self.conn, user_id)
+        current_timestamp = datetime.utcnow()
+        self.last_gamble = [entry for entry in self.last_gamble if (current_timestamp - entry[1]).total_seconds() <= 5]
+
+
+        if self.check_last_action(self.last_gamble, user_id, current_timestamp):
+            await ctx.send("You can't make another play within 5 seconds of your last action.")
+            return
+        # Add the current action to the list
+        self.last_gamble.append((user_id, current_timestamp))
+
+
+        # Check if bet amount is positive
+        if bet <= 0:
+            await ctx.send(f"{ctx.author.mention}, bet amount must be a positive number.")
+
+        if bet < minBet:
+            await ctx.send(f"{ctx.author.mention}, minimum bet is {minBet:,.2f} $QSE.")
+            return
+
+        if bet > maxBet:
+            await ctx.send(f"{ctx.author.mention}, the maximum bet amount is {maxBet:,.2f} $QSE.")
+            return
+        if bet > current_balance:
+            # Calculate the missing amount needed to complete the transaction including tax.
+            missing_amount = bet - current_balance
+            await ctx.send(f"{ctx.author.mention}, you do not have enough $QSE to place the bet. You need {missing_amount:,.2f} more $QSE, including Gas, to place this bet.")
+            return
+
+        # Initialize roulette wheel as numbers 0-36 with their associated colors
+        red_numbers = list(range(1, 11, 2)) + list(range(12, 19, 2)) + list(range(19, 29, 2)) + list(range(30, 37, 2))
+        wheel = [(str(i), 'red' if i in red_numbers else 'black' if i != 0 else 'green') for i in range(37)]
+
+        # Spin the wheel
+        spin_result, spin_color = random.choice(wheel)
+
+        tax_percentage = self.calculate_tax_percentage(ctx, "sell_etf")
+        tax = (bet * Decimal(tax_percentage))
+        total_cost = bet + tax
+
+        # Check for negative balance after tax
+        if current_balance - total_cost < 0:
+            await ctx.send(f"{ctx.author.mention}, you don't have enough $QSE to cover the bet and Gas.")
+            return
+
+        # Deduct bet and tax from user's current balance
+        new_balance = current_balance - total_cost
+        await update_user_balance(self.conn, user_id, new_balance)
+
+        # Check if the user wins
+        win_amount = 0
+        if choice.lower() == spin_color:
+            win_amount = bet * 4  # Payout for color choice is 2x
+        elif choice.isdigit() and int(choice) == int(spin_result):
+            win_amount = bet * 70  # Payout for number choice is 35x
+        elif choice.lower() == "even" and int(spin_result) % 2 == 0 and spin_result != '0':
+            win_amount = bet * 4  # Payout for 'even' is 2x
+        elif choice.lower() == "odd" and int(spin_result) % 2 != 0:
+            win_amount = bet * 4  # Payout for 'odd' is 2x
+
+        if win_amount > 0:
+            new_balance += win_amount
+#            await update_user_balance(self.conn, user_id, new_balance)
+            await self.send_from_reserve(ctx, user_id, win_amount)
+            await ctx.send(f"{ctx.author.mention}, congratulations! The ball landed on {spin_result} ({spin_color}). You won {win_amount} $QSE. Your new balance is {new_balance - tax:,.2f}.")
+            await log_gambling_transaction(ledger_conn, ctx, "Roulette", bet, f"You won {win_amount} $QSE", new_balance)
+            await self.casinoTool(ctx, True)
+        else:
+            await ctx.send(f"{ctx.author.mention}, the ball landed on {spin_result} ({spin_color}). You lost {total_cost} $QSE including Gas. Your new balance is {new_balance - tax:,.2f}.")
+            await log_gambling_transaction(ledger_conn, ctx, "Roulette", bet, f"You lost {total_cost} $QSE", new_balance)
+            await self.casinoTool(ctx, False)
+        # Transfer the tax amount to the bot's address P3:03da907038
+#        await update_user_balance(self.conn, get_user_id(self.P3addrConn, self.bot_address), get_user_balance(self.conn, get_user_id(self.P3addrConn, self.bot_address)) + tax)
+#        await log_transfer(self, ledger_conn, ctx, "P3 Bot", self.bot_address, get_user_id(self.P3addrConn, self.bot_address), tax)
+        elapsed_time = timeit.default_timer() - self.casino_timer_start
+        self.casino_avg.append(elapsed_time)
+
+    @commands.command(name='coinflip', help='Flip a coin and bet on heads or tails.')
+    async def coinflip(self, ctx, choice: str, bet: int):
+        self.casino_timer_start = timeit.default_timer()
+        user_id = ctx.author.id
+        current_balance = get_user_balance(self.conn, user_id)
+        current_timestamp = datetime.utcnow()
+        self.last_gamble = [entry for entry in self.last_gamble if (current_timestamp - entry[1]).total_seconds() <= 5]
+
+
+        if self.check_last_action(self.last_gamble, user_id, current_timestamp):
+            await ctx.send("You can't make another play within 5 seconds of your last action.")
+            return
+        # Add the current action to the list
+        self.last_gamble.append((user_id, current_timestamp))
+
+        # Check if bet amount is positive
+        if bet <= 0:
+            await ctx.send(f"{ctx.author.mention}, bet amount must be a positive number.")
+            return
+
+        if bet < minBet:
+            await ctx.send(f"{ctx.author.mention}, minimum bet is {minBet:,.2f} $QSE.")
+            return
+
+        if bet > maxBet:
+            await ctx.send(f"{ctx.author.mention}, the maximum bet amount is {maxBet:,.2f} $QSE.")
+            return
+
+        if bet > current_balance:
+            # Calculate the missing amount needed to complete the transaction including tax.
+            missing_amount = bet - current_balance
+            await ctx.send(f"{ctx.author.mention}, you do not have enough $QSE to place the bet. You need {missing_amount:,.2f} more $QSE, including Gas, to place this bet.")
+            return
+
+        # Flip the coin
+        coin_result = random.choice(['heads', 'tails'])
+
+        tax_percentage = self.calculate_tax_percentage(ctx, "sell_etf")
+        tax = (bet * Decimal(tax_percentage))
+        total_cost = bet + tax
+
+        # Check for negative balance after tax
+        if current_balance - total_cost < 0:
+            await ctx.send(f"{ctx.author.mention}, you don't have enough $QSE to cover the bet and Gas.")
+            return
+
+        # Deduct bet and tax from user's current balance
+        new_balance = current_balance - total_cost
+#        await update_user_balance(self.conn, user_id, new_balance)
+        P3addrConn = sqlite3.connect("P3addr.db")
+        PBotAddr = get_p3_address(P3addrConn, PBot)
+        await self.give_addr(ctx, PBotAddr, int(total_cost), False)
+
+        # Check if the user wins
+        win = choice.lower() == coin_result
+
+        # Create an embed to display the result
+        embed = discord.Embed(title="Coinflip Result", color=discord.Color.gold())
+        embed.add_field(name="Your Choice", value=choice.capitalize(), inline=True)
+        embed.add_field(name="Coin Landed On", value=coin_result.capitalize(), inline=True)
+
+        if win:
+            win_amount = bet * 4  # Payout for correct choice is 2x
+            new_balance += win_amount
+            embed.add_field(name="Congratulations!", value=f"You won {win_amount:,.2f} $QSE", inline=False)
+            await self.casinoTool(ctx, True)
+        else:
+            embed.add_field(name="Oops!", value=f"You lost {total_cost:,.2f} $QSE including Gas", inline=False)
+            await self.casinoTool(ctx, False)
+
+        embed.add_field(name="New Balance", value=f"{new_balance:,.2f} $QSE", inline=False)
+
+        await ctx.send(embed=embed)
+        await log_gambling_transaction(ledger_conn, ctx, "Coinflip", bet, f"{'Win' if win else 'Loss'}", new_balance)
+        # Transfer the tax amount to the bot's address P3:03da907038
+        await update_user_balance(self.conn, get_user_id(self.P3addrConn, self.bot_address), get_user_balance(self.conn, get_user_id(self.P3addrConn, self.bot_address)) + tax)
+        await log_transfer(self, ledger_conn, ctx, "P3 Bot", self.bot_address, get_user_id(self.P3addrConn, self.bot_address), tax)
+        elapsed_time = timeit.default_timer() - self.casino_timer_start
+        self.casino_avg.append(elapsed_time)
+
+    @commands.command(name='slotmachine', aliases=['slots'], help='Play the slot machine. Bet an amount up to 500,000 $QSE.')
+    @is_allowed_user(930513222820331590)
+    async def slotmachine(self, ctx, bet: int):
+        self.casino_timer_start = timeit.default_timer()
+        user_id = ctx.author.id
+        current_balance = get_user_balance(self.conn, user_id)
+        current_timestamp = datetime.utcnow()
+        self.last_gamble = [entry for entry in self.last_gamble if (current_timestamp - entry[1]).total_seconds() <= 5]
+
+
+        if self.check_last_action(self.last_gamble, user_id, current_timestamp):
+            await ctx.send("You can't make another play within 5 seconds of your last action.")
+            return
+        # Add the current action to the list
+        self.last_gamble.append((user_id, current_timestamp))
+
+        # Check if bet amount is positive and within the limit
+        if bet <= 0:
+            await ctx.send(f"{ctx.author.mention}, bet amount must be a positive number.")
+            return
+
+        if bet < minBet:
+            await ctx.send(f"{ctx.author.mention}, minimum bet is {minBet:,.2f} $QSE.")
+            return
+
+        if bet > maxBet:
+            await ctx.send(f"{ctx.author.mention}, the maximum bet amount is {maxBet:,.2f} $QSE.")
+            return
+
+        # Define slot machine symbols and their values
+        symbols = ["🍒", "🍋", "🍊", "🍇", "🔔", "💎", "7️⃣"]
+        payouts = {"🍒": 5, "🍋": 10, "🍊": 15, "🍇": 20, "🔔": 25, "💎": 50, "7️⃣": 100}
+
+        # Spin the slot machine
+        result = [random.choice(symbols) for _ in range(3)]
+
+        # Calculate the payout
+        if all(symbol == result[0] for symbol in result):
+            payout_multiplier = payouts[result[0]]
+        elif result[0] == result[1] or result[1] == result[2]:
+            payout_multiplier = 25  # 2 in a row with 2.25% payout
+        else:
+            payout_multiplier = 0
+
+        win_amount = bet * payout_multiplier
+
+        # Calculate tax based on the bet amount
+        tax_percentage = self.calculate_tax_percentage(ctx, "sell_etf")
+        tax = (bet * Decimal(tax_percentage))
+
+        # Calculate total cost including tax
+        total_cost = bet + tax
+
+        # Check for negative balance after tax
+        if current_balance - total_cost < 0:
+            await ctx.send(f"{ctx.author.mention}, you don't have enough $QSE to cover the bet and Gas.")
+            return
+
+        # Deduct the bet and tax from the user's current balance
+        new_balance = current_balance - total_cost
+        await update_user_balance(self.conn, user_id, new_balance)
+
+        # Create and send the embed with the slot machine result
+        embed = discord.Embed(title="Slot Machine", color=discord.Color.gold())
+        embed.add_field(name="Result", value=" ".join(result), inline=False)
+
+        if win_amount > 0:
+            new_balance += Decimal(win_amount)
+            await update_user_balance(self.conn, user_id, new_balance)
+            embed.add_field(name="Congratulations!", value=f"You won {win_amount:,} $QSE!", inline=False)
+            await log_gambling_transaction(ledger_conn, ctx, "Slots", bet, f"You won {win_amount} $QSE", new_balance)
+            await self.casinoTool(ctx, True)
+        else:
+            embed.add_field(name="Better luck next time!", value=f"You lost {total_cost:,.2f} $QSE including Gas. Your new balance is {new_balance:,.2f} $QSE.", inline=False)
+            await log_gambling_transaction(ledger_conn, ctx, "Slots", bet, f"You lost {total_cost:,.2f} $QSE", new_balance)
+            await self.casinoTool(ctx, False)
+
+        embed.set_footer(text=f"Your new balance: {new_balance:,.2f} $QSE")
+        await ctx.send(embed=embed)
+        # Transfer the tax amount to the bot's address P3:03da907038
+        await update_user_balance(self.conn, get_user_id(self.P3addrConn, self.bot_address), get_user_balance(self.conn, get_user_id(self.P3addrConn, self.bot_address)) + tax)
+        await log_transfer(self, ledger_conn, ctx, "P3 Bot", self.bot_address, get_user_id(self.P3addrConn, self.bot_address), tax)
+        elapsed_time = timeit.default_timer() - self.casino_timer_start
+        self.casino_avg.append(elapsed_time)
+
+
+
+
+    @commands.command(name='dice_roll', aliases=["dice"], help='Roll a dice. Bet on a number (1-6).')
+    @is_allowed_user(930513222820331590)
+    async def dice_roll(self, ctx, chosen_number: int, bet_amount: int):
+        self.casino_timer_start = timeit.default_timer()
+        user_id = ctx.author.id
+        current_balance = get_user_balance(self.conn, user_id)
+
+        # Check if bet amount is positive and within the limit
+        if bet_amount <= 0:
+            await ctx.send(f"{ctx.author.mention}, bet amount must be a positive number.")
+            return
+
+        if bet_amount < minBet:
+            await ctx.send(f"{ctx.author.mention}, minimum bet is {minBet:,.2f} $QSE.")
+            return
+
+        if bet_amount > maxBet:
+            await ctx.send(f"{ctx.author.mention}, the maximum bet amount is {maxBet:,.2f} $QSE.")
+            return
+
+        # Check if chosen number is valid
+        if chosen_number < 1 or chosen_number > 6:
+            await ctx.send("Please choose a number between 1 and 6.")
+            return
+
+        # Roll the dice
+        dice_result = random.randint(1, 6)
+
+        # Calculate the payout
+        if dice_result == chosen_number:
+            win_amount = bet_amount * 5  # 5x payout for an exact match
+        else:
+            win_amount = 0
+
+        # Calculate tax based on the bet amount
+        tax_percentage = self.calculate_tax_percentage(ctx, "dice_roll")
+        tax = Decimal(bet_amount) * Decimal(tax_percentage)
+
+        # Calculate total cost including tax
+        total_cost = Decimal(bet_amount) + tax
+
+        # Check for negative balance after tax
+        if current_balance - total_cost < 0:
+            await ctx.send(f"{ctx.author.mention}, you don't have enough $QSE to cover the bet and Gas.")
+            return
+
+        # Deduct the bet and tax from the user's current balance
+        new_balance = current_balance - total_cost
+        await update_user_balance(self.conn, user_id, new_balance)
+
+        # Create and send the embed with the dice roll result
+        embed = discord.Embed(title="Dice Roll 🎲", color=discord.Color.gold())
+        embed.add_field(name="Result", value=f"The dice rolled: {dice_result}", inline=False)
+
+        if win_amount > 0:
+            new_balance += win_amount
+            await update_user_balance(self.conn, user_id, new_balance)
+            embed.add_field(name="Congratulations!", value=f"You guessed right! You won {win_amount:,.2f} $QSE!", inline=False)
+            await log_gambling_transaction(ledger_conn, ctx, "Dice Roll", bet_amount, f"You won {win_amount} $QSE", new_balance)
+            await self.casinoTool(ctx, True)
+        else:
+            embed.add_field(name="Better luck next time!", value=f"You lost {total_cost:,.2f} $QSE including Gas. Your new balance is {new_balance:,.2f} $QSE.", inline=False)
+            await log_gambling_transaction(ledger_conn, ctx, "Dice Roll", bet_amount, f"You lost {total_cost:,.2f} $QSE", new_balance)
+            await self.casinoTool(ctx, False)
+
+        embed.set_footer(text=f"Your new balance: {new_balance:,.2f} $QSE")
+        await ctx.send(embed=embed)
+        # Transfer the tax amount to the bot's address P3:03da907038
+        await update_user_balance(self.conn, get_user_id(self.P3addrConn, self.bot_address), get_user_balance(self.conn, get_user_id(self.P3addrConn, self.bot_address)) + tax)
+        await log_transfer(self, ledger_conn, ctx, "P3 Bot", self.bot_address, get_user_id(self.P3addrConn, self.bot_address), tax)
+        elapsed_time = timeit.default_timer() - self.casino_timer_start
+        self.casino_avg.append(elapsed_time)
+
+
+
+    @commands.command(name='rpg_stats', help='View your RPG stats.')
+    async def rpg_stats(self, ctx):
+        try:
+            user_id = ctx.author.id
+            cursor = self.conn.cursor()
+
+            # Get user's RPG stats
+            rpg_stats = cursor.execute("SELECT * FROM users_rpg_stats WHERE user_id=?", (user_id,)).fetchone()
+
+
+            level, experience = get_user_level(self.conn, user_id)
+            exp_req = calculate_experience_for_level(level + 1)
+            # Calculate the percentage of experience towards the next level
+            percentage = (experience / exp_req) * 100
+
+            # Choose emojis or characters for filled and empty portions with different colors
+            filled_char = ":large_blue_diamond:"
+            empty_char = ":black_large_square: "   # White color for empty portion
+
+            # Create a level bar using colored emojis or characters
+            bar_length = 10
+            filled_length = int(bar_length * (percentage / 100))
+            level_bar = filled_char * filled_length + empty_char * (bar_length - filled_length)
+            city = get_current_city(user_id)
+            if city not in self.cities:
+                set_current_city(user_id, "StellarHub")
+
+
+            if rpg_stats:
+                # Create an embed to display RPG stats
+                embed = Embed(title="Your RPG Stats", color=Colour.blue())
+
+                # Map stat names to corresponding emojis
+                stat_emojis = {
+                    'hp': '❤️',
+                    'atk': '⚔️',
+                    'def': '🛡️',
+                    'eva': '🎯',
+                    'luck': '🍀',
+                    'chr': '🎭',
+                    'spd': '⚡',
+                }
+
+                # Combine current and maximum HP
+                hp_value = f"{rpg_stats['cur_hp']}/{rpg_stats['max_hp']}"
+                embed.add_field(name="Lvl", value=f"{level:,.0f}" if level != 0 else "0", inline=False)
+                embed.add_field(name="Experience", value=f"{experience:,.0f}/{exp_req:,.0f}\n{level_bar} {percentage:.2f}%", inline=False)
+                embed.add_field(name="------------------------------------------", value="", inline=False)
+                embed.add_field(name=f"{stat_emojis['hp']} HP", value=hp_value, inline=True)
+
+                # Add each remaining stat to the embed
+                for stat, emoji in stat_emojis.items():
+                    if stat != 'hp':
+                        stat_value = rpg_stats[stat]
+                        embed.add_field(name=f"{emoji} {stat.capitalize()}", value=stat_value, inline=True)
+                embed.add_field(name=f"Current City: ", value=city, inline=True)
+                await ctx.send(embed=embed)
+
+            else:
+                await ctx.send("You haven't started your RPG adventure yet...\n\ncreating rpg stats...")
+                create_user_rpg_stats(user_id)
+                await self.rpg_stats(ctx)
+
+        except sqlite3.Error as e:
+            print(f"Error retrieving RPG stats for user {user_id}: {e}")
+
+
+
+    @commands.command(name='heal', help='Heal another user.')
+    async def heal(self, ctx, target):
+        try:
+            # Assuming you have functions to get and update RPG stats
+            target_id = get_user_id(self.P3addrConn, target)
+            healer_id = ctx.author.id
+            # Get user's and target's RPG stats
+            target_stats = get_rpg_stats(target_id)
+
+            # Assuming 'cur_hp' and 'max_hp' are RPG stats
+
+            target_cur_hp = target_stats.get('cur_hp', 0)
+
+            if healer_id == target_id:
+
+                # Perform the healing logic (adjust as needed)
+                heal_amount = target_stats['max_hp'] - target_cur_hp  # You can customize the amount of healing
+                new_target_hp = min(target_cur_hp + heal_amount, target_stats.get('max_hp', 10))
+
+                # Update the target's current HP
+                update_rpg_stat(target_id, 'cur_hp', new_target_hp)
+
+                await ctx.send(f"{target} healed for {heal_amount} HP! 🌟")
+            else:
+                await ctx.send(f"{target} HP must be 0 to heal")
+
+        except Exception as e:
+            print(f"Error in heal command: {e}")
+            await ctx.send("An unexpected error occurred. Please try again later.")
+
+
+    @commands.command(name='setdefaultcity')
+    async def set_default_city(self, ctx):
+        # Connect to your SQLite database
+        cursor = self.conn.cursor()
+
+        try:
+            # Update all rows in users_rpg_cities to set current_city to 'StellarHub'
+            cursor.execute("""
+                UPDATE users_rpg_cities
+                SET current_city = 'StellarHub'
+            """)
+            self.conn.commit()
+
+            await ctx.send("All users' current city has been set to StellarHub.")
+        except sqlite3.Error as e:
+            print(f"An error occurred while updating default cities: {e}")
+            await ctx.send("An error occurred while updating default cities.")
+
+        # Close the database connection
+        self.conn.close()
+
+
+
+    @commands.command(name='update_city_stats', help='Update city statistics')
+    async def update_city_stats_command(self, ctx, city, qse, resources, stocks, etps):
+        update_city_stats(city, qse, resources, stocks, etps)
+        await ctx.send(f"City statistics updated for {city}.")
+
+
+
+
+    @commands.command(name='city_stats', help='Display the number of people and additional statistics in each city')
+    async def city_stats(self, ctx):
+        try:
+            cursor = self.conn.cursor()
+
+            # Fetch the city statistics (population count) and additional statistics
+            cursor.execute("""
+                SELECT
+                    c.current_city,
+                    COALESCE(COUNT(user_id), 0) AS population,
+                    COALESCE(s.QSE, 0) AS QSE,
+                    COALESCE(s.Resources, 0) AS Resources,
+                    COALESCE(s.Stocks, 0) AS Stocks,
+                    COALESCE(s.ETPs, 0) AS ETPs
+                FROM users_rpg_cities c
+                LEFT JOIN user_city_stats s ON c.current_city = s.city
+                WHERE c.current_city IS NOT NULL
+                GROUP BY c.current_city
+            """)
+            city_stats = cursor.fetchall()
+
+            if city_stats:
+                # Create an embed to display city statistics
+                embed = discord.Embed(title='City Statistics', color=discord.Colour.blue())
+
+                for city, population, qse, resources, stocks, etps in city_stats:
+                    address = await get_city_addr(self, ctx, city)
+                    await self.stats(ctx, address)
+                    embed.add_field(
+                        name=f"{city}: { await get_city_addr(self, ctx, city)}",
+                        value=f"\n\nNumber of People: {population:,.0f}\n\n",
+                        inline=False
+                    )
+
+                await ctx.send(embed=embed)
+                await self.city_config_info(ctx)
+            else:
+                await ctx.send("No city statistics available.")
+
+        except sqlite3.Error as e:
+            print(f"An error occurred while fetching city statistics: {e}")
+            await ctx.send("An error occurred while fetching city statistics. Please try again later.")
+
+
+
+    @commands.command(name='travel', help='Travel to a different city')
+    async def travel(self, ctx, destination_city):
+        async with self.db_semaphore:
+            async with self.transaction_lock:
+                user_id = ctx.author.id
+                current_city = get_current_city(user_id)
+
+                if destination_city not in self.cities:
+                    await ctx.send(f"{destination_city} does not exist")
+                    return
+
+                if current_city:
+                    if current_city == destination_city:
+                        await ctx.send(f"You are already in {destination_city}.")
+                        return
+                    else:
+                        last_travel_timestamp = get_last_travel_timestamp(self, user_id)
+                        cooldown_duration = timedelta(hours=1)
+
+                        if (datetime.now() - last_travel_timestamp) >= cooldown_duration:
+                            # Check if the user has traveled recently
+                            recent_travel_payment = await check_recent_travel(self, ctx)
+
+                            # Check if the user has agreed to pay QSE to travel early
+                            if not recent_travel_payment:
+                                return
+
+                            # Proceed with travel if user agrees to pay or if there's no recent travel
+                            await ctx.send(f"Traveling to {destination_city}.")
+                            set_last_travel_timestamp(self, user_id, datetime.now())
+                            set_last_city(user_id, get_current_city(user_id))
+                            set_current_city(user_id, destination_city)
+                        else:
+                            remaining_cooldown = cooldown_duration - (datetime.now() - last_travel_timestamp)
+                            await ctx.send(f"You cannot travel again so soon. Wait for the cooldown. Remaining cooldown: {remaining_cooldown}")
+                else:
+                    await ctx.send("Error: Unable to retrieve the current city. Try again.")
+
+
+
+    @commands.command(name="attack")
+    @is_allowed_user(930513222820331590, PBot)
+    async def attack(self, ctx, target):
+        async with self.db_semaphore:
+            async with self.transaction_lock:
+                try:
+                    attacker_id = ctx.author.id
+                    defender_id = get_user_id(self.P3addrConn, target)
+
+                    if attacker_id == defender_id:
+                        embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.red())
+                        embed.add_field(name=f"Battle Failed", value=f"Cannot attack yourself")
+                        await ctx.send(embed=embed)
+                        return
+
+                    attacker_city = get_current_city(attacker_id)
+                    defender_city = get_current_city(defender_id)
+
+
+                    if attacker_city == self.safe_city:
+                        embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.red())
+                        embed.add_field(name=f"Current city is non-PvP", value=f"Your Current City: {attacker_city}")
+                        await ctx.send(embed=embed)
+                        return
+
+                    if attacker_city != defender_city:
+                        embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.red())
+                        embed.add_field(name=f"{target} is not in the same city as you", value=f"Your Current City: {attacker_city}")
+                        await ctx.send(embed=embed)
+                        return
+
+                    # Get RPG stats for both the attacker and defender
+                    attacker_stats = get_rpg_stats(attacker_id)
+                    defender_stats = get_rpg_stats(defender_id)
+
+                    if attacker_stats['cur_hp'] == 0:
+                        embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.red())
+                        embed.add_field(name="Your HP is 0", value="")
+                        await ctx.send(embed=embed)
+                        return
+
+                    if defender_stats['cur_hp'] == 0:
+                        embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.red())
+                        embed.add_field(name=f"{get_p3_address(self.P3addrConn, defender_id)} already at 0 HP", value="")
+                        await ctx.send(embed=embed)
+                        return
+
+                    if attacker_stats and defender_stats:
+                        # Calculate damage based on attacker's stats
+                        damage = calculate_damage(attacker_stats, defender_stats)
+                        critical = False
+                        if random.randint(1, 50) == 1:
+                            damage = damage * random.randint(2, 5)
+                            critical = True
+
+                        # Apply damage to defender's current HP
+                        defender_current_hp = check_current_hp(defender_id)
+                        new_defender_hp = max(0, defender_current_hp - damage)
+
+                        experience, level = get_user_experience_info(self.conn, defender_id)
+                        if new_defender_hp == 0:
+#                            current_balance = float(get_user_balance(self.conn, attacker_id))
+#                            winnings = max(current_balance * 0.0001), 1 #.001% of loser QSE with a minimum of 1 QSE
+#                            await self.give_addr(ctx, PBotAddr, int(winnings), False)
+                            await add_experience(self, self.conn, attacker_id, (random.randint(10, 50) + level) / 2, ctx)
+                            return
+
+                        # Update defender's current HP
+                        update_current_hp(defender_id, new_defender_hp)
+
+                        # Send DM to the defender
+                        defender_member = ctx.guild.get_member(defender_id)
+                        if defender_member:
+                            defender_dm_channel = await defender_member.create_dm()
+
+                            # Include attack details in the DM
+                            attack_details = f"Attacker: {get_p3_address(self.P3addrConn, attacker_id)}\n"
+                            attack_details += f"Defender: {get_p3_address(self.P3addrConn, defender_id)}\n"
+                            attack_details += f"Damage Dealt: {damage:,.0f} HP\n"
+                            attack_details += f"Current HP: {new_defender_hp:,.0f}/{defender_stats['max_hp']:,.0f} HP"
+
+                            await defender_dm_channel.send(attack_details)
+
+                        if damage != 0 and critical:
+                            # Create an embed to display the attack result
+                            embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)} Fires a shot at {get_p3_address(self.P3addrConn, defender_id)}", color=discord.Colour.yellow())
+                            embed.add_field(name="Critical Damage Dealt", value=f"{damage:,.0f} HP")
+                            embed.add_field(name="Defender's Current HP", value=f"{new_defender_hp:,.0f}/{defender_stats['max_hp']:,.0f} HP")
+
+                            await add_experience(self, self.conn, attacker_id, (damage * level) / 2, ctx)
+
+                            await ctx.send(embed=embed)
+
+                            if new_defender_hp == 0:
+                                embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)} has killed {get_p3_address(self.P3addrConn, defender_id)}", color=discord.Colour.green())
+                                await ctx.send(embed=embed)
+                                return
+
+                        elif damage != 0 and not critical:
+                            # Create an embed to display the attack result
+                            embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)} Fires a shot at {get_p3_address(self.P3addrConn, defender_id)}", color=discord.Colour.yellow())
+                            embed.add_field(name="Damage Dealt", value=f"{damage:,.0f} HP")
+                            embed.add_field(name="Defender's Current HP", value=f"{new_defender_hp:,.0f}/{defender_stats['max_hp']:,.0f} HP")
+
+                            await add_experience(self, self.conn, attacker_id, damage / 2, ctx)
+
+                            await ctx.send(embed=embed)
+
+
+
+                            if new_defender_hp == 0:
+                                embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)} has killed {get_p3_address(self.P3addrConn, defender_id)}", color=discord.Colour.green())
+                                await ctx.send(embed=embed)
+                                return
+
+                        else:
+                            embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)} Fires a shot at {get_p3_address(self.P3addrConn, defender_id)}", color=discord.Colour.red())
+                            embed.add_field(name="Damage Dealt", value=f"{damage:,.0f} HP")
+                            embed.add_field(name="Attack Missed...", value="")
+
+                            await ctx.send(embed=embed)
+
+                        # Simulate defender's attack back once
+                        defender_damage = calculate_damage(defender_stats, attacker_stats)
+                        defender_critical = False
+                        if random.randint(1, 50) == 1:
+                            defender_damage = defender_damage * random.randint(2, 5)
+                            defender_critical = True
+
+                        # Apply damage to attacker's current HP
+                        attacker_current_hp = check_current_hp(attacker_id)
+                        new_attacker_hp = max(0, attacker_current_hp - defender_damage)
+
+                        experience, level = get_user_experience_info(self.conn, defender_id)
+                        if new_attacker_hp == 0:
+                            await add_experience(self, self.conn, defender_id, (random.randint(10, 50) * level) / 2, ctx)
+
+                        # Update defender's current HP
+                        update_current_hp(attacker_id, new_attacker_hp)
+
+                        if defender_damage != 0 and defender_critical:
+                            # Create an embed to display the defender's counter-attack result
+                            embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, defender_id)} Counters with a shot at {get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.yellow())
+                            embed.add_field(name="Critical Damage Dealt", value=f"{defender_damage} HP")
+                            embed.add_field(name="Attacker's Current HP", value=f"{new_attacker_hp}/{attacker_stats['max_hp']} HP")
+
+                            await add_experience(self, self.conn, defender_id, (defender_damage * level) / 2, ctx)
+
+                            await ctx.send(embed=embed)
+
+                            if new_attacker_hp == 0:
+                                embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, defender_id)} has killed {get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.green())
+                                await ctx.send(embed=embed)
+                                return
+
+                        elif defender_damage != 0 and not defender_critical:
+                            # Create an embed to display the defender's counter-attack result
+                            embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, defender_id)} Counters with a shot at {get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.yellow())
+                            embed.add_field(name="Damage Dealt", value=f"{defender_damage} HP")
+                            embed.add_field(name="Attacker's Current HP", value=f"{new_attacker_hp}/{attacker_stats['max_hp']} HP")
+
+                            await add_experience(self, self.conn, defender_id, defender_damage  / 2, ctx)
+
+                            await ctx.send(embed=embed)
+
+                            if new_attacker_hp == 0:
+                                embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, defender_id)} has killed {get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.green())
+                                await ctx.send(embed=embed)
+                                return
+
+                        else:
+                            embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, defender_id)} Counters with a shot at {get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.red())
+                            embed.add_field(name="Damage Dealt", value=f"{defender_damage} HP")
+                            embed.add_field(name="Attack Missed...", value="")
+
+                            await ctx.send(embed=embed)
+
+                    else:
+                        await ctx.send("Error retrieving RPG stats for attacker or defender.")
+
+                except Exception as e:
+                    print(f"An unexpected error occurred: {e}")
+                    await ctx.send("An unexpected error occurred during the attack. Please try again later.")
+
+
+    @commands.command(name="b2d")
+    @is_allowed_user(930513222820331590, PBot)
+    async def b2d(self, ctx, target):
+        async with self.db_semaphore:
+            async with self.transaction_lock:
+                try:
+                    attacker_id = ctx.author.id
+                    defender_id = get_user_id(self.P3addrConn, target)
+
+                    if attacker_id == defender_id:
+                        embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.red())
+                        embed.add_field(name=f"Battle Failed", value=f"Cannot battle yourself")
+                        await ctx.send(embed=embed)
+                        return
+
+                    attacker_city = get_current_city(attacker_id)
+                    defender_city = get_current_city(defender_id)
+
+                    if attacker_city == self.safe_city:
+                        embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.red())
+                        embed.add_field(name=f"Current city is non-PvP", value=f"Your Current City: {attacker_city}")
+                        await ctx.send(embed=embed)
+                        return
+
+                    if attacker_city != defender_city:
+                        embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.red())
+                        embed.add_field(name=f"{target} is not in the same city as you", value=f"Your Current City: {attacker_city}")
+                        await ctx.send(embed=embed)
+                        return
+
+                    # Get RPG stats for both the attacker and defender
+                    attacker_stats = get_rpg_stats(attacker_id)
+                    defender_stats = get_rpg_stats(defender_id)
+
+                    if attacker_stats['cur_hp'] == 0:
+                        embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.red())
+                        embed.add_field(name="Your HP is 0", value="")
+                        await ctx.send(embed=embed)
+                        return
+
+                    if defender_stats['cur_hp'] == 0:
+                        embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)}", color=discord.Colour.red())
+                        embed.add_field(name=f"{get_p3_address(self.P3addrConn, defender_id)} already at 0 HP", value="")
+                        await ctx.send(embed=embed)
+                        return
+
+                    # Continue attacking until one of the players dies
+                    while attacker_stats['cur_hp'] > 0 and defender_stats['cur_hp'] > 0:
+                        # Calculate damage and apply it to defender's HP
+                        damage = calculate_damage(attacker_stats, defender_stats)
+                        defender_current_hp = check_current_hp(defender_id)
+                        new_defender_hp = max(0, defender_current_hp - damage)
+                        update_current_hp(defender_id, new_defender_hp)
+
+                        # Wait for 5 seconds before the next attack
+                        await asyncio.sleep(0.5)
+
+                        # Calculate damage from defender's counter-attack and apply it to attacker's HP
+                        defender_damage = calculate_damage(defender_stats, attacker_stats)
+                        attacker_current_hp = check_current_hp(attacker_id)
+                        new_attacker_hp = max(0, attacker_current_hp - defender_damage)
+                        update_current_hp(attacker_id, new_attacker_hp)
+
+                        # Wait for 5 seconds before the next attack
+                        await asyncio.sleep(0.5)
+
+                        # Create embeds to display each attack
+                        attacker_embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, attacker_id)}'s Attack", color=discord.Colour.red())
+                        attacker_embed.add_field(name="Damage Dealt", value=f"{damage} HP")
+                        attacker_embed.add_field(name="Defender's Current HP", value=f"{new_defender_hp}/{defender_stats['max_hp']} HP")
+
+                        defender_embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, defender_id)}'s Counter-Attack", color=discord.Colour.blue())
+                        defender_embed.add_field(name="Damage Dealt", value=f"{defender_damage} HP")
+                        defender_embed.add_field(name="Attacker's Current HP", value=f"{new_attacker_hp}/{attacker_stats['max_hp']} HP")
+
+                        # Send embeds for each attack
+                        await ctx.send(embed=attacker_embed)
+                        await ctx.send(embed=defender_embed)
+
+                    # Check and announce the winner
+                    if attacker_stats['cur_hp'] == 0:
+                        winner_id = defender_id
+                        loser_id = attacker_id
+                    else:
+                        winner_id = attacker_id
+                        loser_id = defender_id
+
+                    winner_embed = discord.Embed(title=f"{get_p3_address(self.P3addrConn, winner_id)} is victorious!", color=discord.Colour.green())
+                    winner_embed.add_field(name=f"Winner: {get_p3_address(self.P3addrConn, winner_id)}", value=f"Loser: {get_p3_address(self.P3addrConn, loser_id)}")
+                    await ctx.send(embed=winner_embed)
+
+                except Exception as e:
+                    print(f"An unexpected error occurred: {e}")
+                    await ctx.send("An unexpected error occurred during the battle. Please try again later.")

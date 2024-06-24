@@ -1,0 +1,272 @@
+# Begin level
+
+
+
+
+def create_users_level_table(conn):
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users_level (
+                user_id INTEGER PRIMARY KEY,
+                level INTEGER NOT NULL,
+                experience INTEGER NOT NULL
+            )
+        """)
+        conn.commit()
+        print("Table 'users_level' created successfully.")
+    except sqlite3.Error as e:
+        print(f"An error occurred while creating the 'users_level' table: {e}")
+
+def insert_user_level(conn, user_id, level, experience):
+    try:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO users_level (user_id, level, experience) VALUES (?, ?, ?)", (user_id, level, experience))
+        conn.commit()
+        print("User level inserted successfully.")
+    except sqlite3.Error as e:
+        print(f"Error inserting user level: {e}")
+
+def update_user_level(conn, user_id, level, experience):
+    try:
+        cursor = conn.cursor()
+        cursor.execute("UPDATE users_level SET level=?, experience=? WHERE user_id=?", (level, experience, user_id))
+        conn.commit()
+        print("User level updated successfully.")
+    except sqlite3.Error as e:
+        print(f"Error updating user level: {e}")
+
+def get_user_level(conn, user_id):
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT level, experience FROM users_level WHERE user_id=?", (user_id,))
+        row = cursor.fetchone()
+
+        if row is not None:
+            level, experience = row
+            print(f"User {user_id} - Level: {level}, Experience: {experience}")
+            return level, experience
+        else:
+            print(f"User {user_id} not found. Setting default values.")
+            # Set default values for level and experience
+            default_level = 1
+            default_experience = 0
+            return default_level, default_experience
+    except sqlite3.Error as e:
+        print(f"Error getting user level: {e}")
+        # Handle the error, you can return default values or raise an exception
+        default_level = 1
+        default_experience = 0
+        return default_level, default_experience
+
+
+def delete_user_level(conn, user_id):
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM users_level WHERE user_id=?", (user_id,))
+        conn.commit()
+        print("User level deleted successfully.")
+    except sqlite3.Error as e:
+        print(f"Error deleting user level: {e}")
+
+def get_user_experience_info(conn, user_id):
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT level, experience FROM users_level WHERE user_id=?", (user_id,))
+        row = cursor.fetchone()
+
+        if row:
+            level, experience = row
+            return level, experience
+        else:
+            # If user not found, return default values
+            return 1, 0
+    except sqlite3.Error as e:
+        print(f"Error getting user level and experience: {e}")
+
+async def add_experience(self, conn, user_id, points, ctx):
+    try:
+        cursor = conn.cursor()
+
+        # Check if the user exists in the table
+        cursor.execute("SELECT user_id, level, experience FROM users_level WHERE user_id=?", (user_id,))
+        user_data = cursor.fetchone()
+
+        if user_data:
+            user_id, level, experience = user_data
+            new_experience = experience + points
+
+            # Check if the user levels up
+            while new_experience >= (level * 100):
+                new_experience -= level * 100
+                level += 1
+
+                # Use the updated level_up function to show the total change in stats
+                await level_up(self, ctx, user_id, 1)
+
+            # Update user's level and experience
+            cursor.execute("UPDATE users_level SET level=?, experience=? WHERE user_id=?", (level, new_experience, user_id))
+        else:
+            # User doesn't exist, insert with default values
+            cursor.execute("INSERT INTO users_level (user_id, level, experience) VALUES (?, 1, ?)", (user_id, points))
+
+        conn.commit()
+
+    except sqlite3.Error as e:
+        print(f"Error adding experience points: {e}")
+
+def calculate_experience_for_level(level):
+    # Adjust this formula based on your desired progression
+    return int(100 * (1.5 ** (level - 1)))
+
+
+def generate_experience_table(levels):
+    experience_table = {level: int(100 * (1.5 ** (level - 1))) for level in range(1, levels + 1)}
+    return experience_table
+
+
+
+
+async def send_dm_user(self, user_id, message):
+    try:
+        user = await self.bot.fetch_user(user_id)
+        if user:
+            await user.send(message)
+            return True
+        else:
+            print(f"User with ID {user_id} not found.")
+            return False
+    except discord.Forbidden:
+        print(f"Failed to send DM to {user_id}: Forbidden (user has DMs disabled)")
+        return False
+
+#async def check_alert(self):
+
+
+
+
+
+
+
+~~~~~~~~~~~~~~~~~~
+level_conn = sqlite3.connect("currency_system.db")
+
+def create_user_rpg_stats(user_id):
+    try:
+        cursor = level_conn.cursor()
+        cursor.execute("""
+            INSERT INTO users_rpg_stats (user_id, cur_hp, max_hp, atk, def, eva, luck, chr, spd)
+            VALUES (?, 10, 10, 1, 1, 1, 1, 1, 1)
+        """, (user_id,))
+        level_conn.commit()
+    except sqlite3.Error as e:
+        print(f"Error creating RPG stats for user {user_id}: {e}")
+
+def update_rpg_stat(user_id, stat, value):
+    try:
+        cursor = level_conn.cursor()
+        cursor.execute(f"UPDATE users_rpg_stats SET {stat} = ? WHERE user_id = ?", (value, user_id))
+        level_conn.commit()
+    except sqlite3.Error as e:
+        print(f"Error updating {stat} for user {user_id}: {e}")
+
+
+
+async def level_up(self, ctx, user_id, levels):
+    # Specify the stats you want to update and their corresponding roll range
+    stat_roll_ranges = {
+        'cur_hp': (5, 20),
+        'max_hp': (5, 20),
+        'atk': (1, 5),
+        'def': (1, 5),
+        'eva': (1, 5),
+        'luck': (1, 5),
+        'chr': (1, 5),
+        'spd': (1, 5),
+    }
+    p3addr = get_p3_address(self.P3addrConn, user_id)
+    try:
+        cursor = level_conn.cursor()
+
+#        # Create an embed to display the old stats
+        old_stats_embed = discord.Embed(title=f"Old RPG Stats for User {p3addr}", color=discord.Colour.orange())
+
+        for stat in stat_roll_ranges.keys():
+            current_value = cursor.execute(f"SELECT {stat} FROM users_rpg_stats WHERE user_id=?", (user_id,)).fetchone()[0]
+            old_stats_embed.add_field(name=stat, value=current_value, inline=True)
+
+        # Send the embed with old stats
+#        await ctx.send(embed=old_stats_embed)
+
+        total_change = {stat: 0 for stat in stat_roll_ranges}
+
+        for _ in range(levels):
+            for stat, roll_range in stat_roll_ranges.items():
+                # Use the rolled value for both cur_hp and max_hp
+                roll_value = random.randint(*roll_range) if stat not in ['cur_hp', 'max_hp'] else random.randint(*stat_roll_ranges['cur_hp'])
+
+                # Update the total change for the stat
+                total_change[stat] += roll_value
+
+        # Apply the total change to the RPG stats
+        for stat, change in total_change.items():
+            current_value = cursor.execute(f"SELECT {stat} FROM users_rpg_stats WHERE user_id=?", (user_id,)).fetchone()[0]
+            update_rpg_stat(user_id, stat, current_value + change)
+
+        # Create an embed to display the total change in stats
+        change_stats_embed = discord.Embed(title=f"Total Change in RPG Stats for User {p3addr}", color=discord.Colour.green())
+
+        for stat, change in total_change.items():
+            change_stats_embed.add_field(name=stat, value=f"+{change}", inline=True)
+
+        # Send the embed with total change in stats
+#        await ctx.send(embed=change_stats_embed)
+
+#        # Create an embed to display the new stats
+        new_stats_embed = discord.Embed(title=f"New RPG Stats for User {p3addr}", color=discord.Colour.green())
+
+        for stat in stat_roll_ranges.keys():
+            new_value = cursor.execute(f"SELECT {stat} FROM users_rpg_stats WHERE user_id=?", (user_id,)).fetchone()[0]
+            new_stats_embed.add_field(name=stat, value=new_value, inline=True)
+
+#        # Send the embed with new stats
+#        await ctx.send(embed=new_stats_embed)
+
+    except sqlite3.Error as e:
+        print(f"Error updating RPG stats for user {user_id}: {e}")
+
+def get_rpg_stats(user_id):
+    try:
+        cursor = level_conn.cursor()
+        cursor.execute("SELECT * FROM users_rpg_stats WHERE user_id=?", (user_id,))
+        result = cursor.fetchone()
+        if result:
+            return {'cur_hp': result[1], 'max_hp': result[2], 'atk': result[3], 'def': result[4], 'eva': result[5],
+                    'luck': result[6], 'chr': result[7], 'spd': result[8]}
+        else:
+            return None
+
+    except sqlite3.Error as e:
+        print(f"Error retrieving RPG stats for user {user_id}: {e}")
+        return None
+
+
+def calculate_damage(attacker_stats, defender_stats):
+    # Calculate base damage based on attacker's attack
+    base_damage = random.randint(1, attacker_stats['atk'])
+
+    # Adjust damage based on various factors
+    attack_multiplier = max(attacker_stats['atk'] / defender_stats['def'], 0.2)
+    hp_ratio_multiplier = max(defender_stats['cur_hp'] / defender_stats['max_hp'], 0.2)
+    evade_multiplier = max(1 - (defender_stats['eva'] / attacker_stats['spd']), 0.1)
+    luck_multiplier = max(1 - defender_stats['luck'] / attacker_stats['luck'], 5)
+    charisma_multiplier = max(attacker_stats['chr'] / 10, 0.1)
+
+    # Calculate the final damage
+    final_damage = max(int(base_damage * attack_multiplier * hp_ratio_multiplier * evade_multiplier * luck_multiplier * charisma_multiplier), 0)
+
+    # If final damage is 0, have a 1-10 chance of hitting a 1
+    if final_damage == 0 and random.randint(1, 10) == 1:
+        final_damage = 1
+
+    return final_damage

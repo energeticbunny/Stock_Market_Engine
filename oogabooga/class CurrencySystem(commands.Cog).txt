@@ -1,0 +1,63 @@
+class CurrencySystem(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.ctx = None
+        self.last_claimed = {}
+        self.short_targets = {}
+        self.conn = setup_database()
+        self.lock = asyncio.Lock()
+        self.claimed_users = set()  # Set to store claimed user IDs
+        self.current_prices_stocks = {}  # Dictionary to store current prices for stocks
+        self.old_prices_stocks = {}  # Dictionary to store old prices for stocks
+        self.current_prices_etfs = {}  # Dictionary to store current values for ETFs
+        self.old_prices_etfs = {}  # Dictionary to store old values for ETFs
+        self.last_job_times = {}
+        self.last_range_times = {}
+        self.games = {}
+        self.bot_address = "P3:03da907038"
+        self.P3addrConn = sqlite3.connect("P3addr.db")
+        self.ledger_conn = sqlite3.connect("p3ledger.db")
+        self.reset_stock_limit_all.start()
+
+        self.last_buyers = []
+        self.last_sellers = []
+        self.last_gamble = []
+        self.last_travel = {}
+
+
+        self.buy_timer_start = 0
+        self.sell_timer_start = 0
+        self.buy_item_timer_start = 0
+        self.sell_item_timer_start = 0
+        self.buy_etf_timer_start = 0
+        self.sell_etf_timer_start = 0
+        self.tax_command_timer_start = 0
+
+        self.buy_stock_avg = []
+        self.sell_stock_avg = []
+        self.buy_etf_avg = []
+        self.sell_etf_avg = []
+        self.buy_item_avg = []
+        self.sell_item_avg = []
+        self.tax_command_avg = [0.1]
+
+        self.casino_timer_start = 0
+        self.reserve_timer_start = 0
+        self.transfer_timer_start = 0
+        self.transfer_avg = []
+        self.casino_avg = []
+        self.reserve_avg = []
+
+        self.run_counter = 0
+
+        self.cache = {}
+
+        self.transaction_pool = []
+        self.skipped_transactions = []
+        self.transaction_lock = asyncio.Lock()
+        self.db_semaphore = asyncio.Semaphore()
+        self.total_pool = 0
+
+        # IPO Config
+        self.ipo_stocks = []
+        self.ipo_price_limit = 100000

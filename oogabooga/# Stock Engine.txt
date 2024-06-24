@@ -1,0 +1,304 @@
+# Stock Engine
+
+
+    @commands.command(name="buy_stock_for_bot")
+    @is_allowed_user(930513222820331590, PBot)
+    async def buy_stock_for_bot(self, ctx, stock_name, amount):
+        self.reserve_timer_start = timeit.default_timer()
+
+        cursor = self.conn.cursor()
+
+        # Get the stock information
+        cursor.execute("SELECT price, available FROM stocks WHERE symbol=?", (stock_name,))
+        stock_info = cursor.fetchone()
+
+        if stock_info is None:
+            await ctx.send(f"This stock '{stock_name}' does not exist.")
+            return
+
+        price, available_stock = map(Decimal, stock_info)
+        total_cost = price * Decimal(amount)
+
+        # Check if there's enough available stock
+        if Decimal(amount) > available_stock:
+            await ctx.send(f"Insufficient available stock for {stock_name}.")
+            return
+
+        # Update bot's stock balance and available stock
+        cursor.execute("""
+            INSERT INTO user_stocks (user_id, symbol, amount)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id, symbol) DO UPDATE SET amount = amount + ?
+        """, (PBot, stock_name, amount, amount))
+
+        # Update available stock
+        cursor.execute("""
+            UPDATE stocks
+            SET available = available - ?
+            WHERE symbol = ?
+        """, (amount, stock_name))
+
+        # Update bot's balance
+#        await update_user_balance(self.conn, PBot, get_user_balance(self.conn, PBot) - total_cost)
+
+
+
+        # Log the transaction
+        await log_transaction(ledger_conn, ctx, "Buy Stock", stock_name, amount, total_cost, total_cost, 0, 0, price, "Fail")
+
+        # Commit the transaction
+        self.conn.commit()
+        elapsed_time = timeit.default_timer() - self.reserve_timer_start
+        self.reserve_avg.append(elapsed_time)
+        avg_time = sum(self.reserve_avg) / len(self.reserve_avg)
+        gas = self.calculate_tax_percentage(ctx, "sell_etf") * 100
+        print(f"""
+                Reserve Buy: {stock_name}
+                -------------------------------------
+                Price: {price:,.2f}
+                Amount: {amount:,}
+                Available {available_stock:,}
+                -------------------------------------
+                Transaction Time: {elapsed_time:.2f}
+                Average Transaction Time: {avg_time:.2f}
+                Current Gas: {gas:,.4f}%
+        """)
+
+
+
+
+    @commands.command(name="sell_stock_for_bot")
+    @is_allowed_user(930513222820331590, PBot)
+    async def sell_stock_for_bot(self, ctx, stock_name, amount):
+        self.reserve_timer_start = timeit.default_timer()
+        cursor = self.conn.cursor()
+
+        # Get the stock information
+        cursor.execute("SELECT price, available FROM stocks WHERE symbol=?", (stock_name,))
+        stock_info = cursor.fetchone()
+
+        if stock_info is None:
+            await ctx.send(f"This stock '{stock_name}' does not exist.")
+            return
+
+        price, available_stock = map(Decimal, stock_info)
+        total_earnings = price * Decimal(amount)
+
+        # Update bot's stock balance and available stock
+        cursor.execute("""
+            UPDATE user_stocks
+            SET amount = amount - ?
+            WHERE user_id = ? AND symbol = ?
+        """, (amount, PBot, stock_name))
+
+        cursor.execute("""
+            UPDATE stocks
+            SET available = available + ?
+            WHERE symbol = ?
+        """, (amount, stock_name))
+
+        # Update bot's balance
+#        await update_user_balance(self.conn, PBot, get_user_balance(self.conn, PBot) + total_earnings)
+
+
+
+        # Log the transaction
+        await log_transaction(ledger_conn, ctx, "Sell Stock", stock_name, amount, total_earnings, total_earnings, 0, 0, price, "Fail")
+
+        # Commit the transaction
+        self.conn.commit()
+        elapsed_time = timeit.default_timer() - self.reserve_timer_start
+        self.reserve_avg.append(elapsed_time)
+        avg_time = sum(self.reserve_avg) / len(self.reserve_avg)
+        gas = self.calculate_tax_percentage(ctx, "sell_etf") * 100
+        print(f"""
+                Reserve Sell: {stock_name}
+                -------------------------------------
+                Price: {price:,.2f}
+                Amount: {amount:,}
+                Available {available_stock:,}
+                -------------------------------------
+                Transaction Time: {elapsed_time:.2f}
+                Average Transaction Time: {avg_time:.2f}
+                Current Gas: {gas:,.4f}%
+        """)
+
+
+
+
+
+
+    @commands.command(name="reward_share_holders", help="Reward P3:Stable shareholders with additional shares.")
+    @is_allowed_user(930513222820331590)
+    async def reward_share_holders(self, ctx, stock_symbol: str, stakingYield: float):
+        cursor = self.conn.cursor()
+
+        try:
+            # Fetch all users who hold P3:Stable
+            cursor.execute("SELECT user_id, amount FROM user_stocks WHERE symbol=? AND amount > 0", (stock_symbol,))
+            stable_holders = cursor.fetchall()
+
+            if not stable_holders:
+                await ctx.send("No users hold P3:Stable.")
+                return
+
+            total_rewarded_shares = 0
+
+            # Reward each shareholder
+            for user_id, amount_held in stable_holders:
+                if user_id == 1092870544988319905 or amount_held == 0.0:
+                    continue
+
+                print(f"UserID: {user_id} holds {amount_held} of {stock_symbol}")
+
+                # Calculate the reward (stakingYield% of the held amount)
+                reward_shares = int(amount_held * stakingYield)
+
+                # Update the user's stock holdings with the rewarded shares
+                new_amount_held = amount_held + reward_shares
+                addrDB = sqlite3.connect("P3addr.db")
+                P3Addr = get_p3_address(addrDB, user_id)
+                await self.give_stock(ctx, P3Addr, stock_symbol, reward_shares, False)
+
+                total_rewarded_shares += reward_shares
+
+            await ctx.send(f"Reward distribution completed. Total {stock_symbol} shares rewarded: {total_rewarded_shares:,.2f} at {stakingYield * 100}%.")
+
+        except Exception as e:
+
+            print(f"An error occurred: {e}")
+            await ctx.send("An error occurred during the reward distribution. Please try again later.")
+
+
+
+    @commands.command(name="reward_share_holders_qse", help="Reward P3:Stable shareholders with additional shares.")
+    @is_allowed_user(930513222820331590)
+    async def reward_share_holders_qse(self, ctx, stock_symbol: str, amount: int):
+        cursor = self.conn.cursor()
+
+        try:
+            # Fetch all users who hold P3:Stable
+            cursor.execute("SELECT user_id, amount FROM user_stocks WHERE symbol=? AND amount > 0", (stock_symbol,))
+            stable_holders = cursor.fetchall()
+
+            if not stable_holders:
+                await ctx.send("No users hold P3:Stable.")
+                return
+
+            total_amount = 0
+
+            # Reward each shareholder
+            for user_id, amount_held in stable_holders:
+                if user_id == 1092870544988319905 or amount_held == 0.0:
+                    continue
+
+                await self.send_from_reserve(ctx, user_id, amount)
+
+
+                total_amount += amount
+
+            await ctx.send(f"Reward distribution completed.\n{stock_symbol}\nTotal Amount QSE: {total_amount:,.2f}.")
+
+        except Exception as e:
+
+            print(f"An error occurred: {e}")
+            await ctx.send("An error occurred during the reward distribution. Please try again later.")
+
+
+
+
+
+    def check_last_action(self, action_list, user_id, current_timestamp):
+        # Check if the user has made an action within the last 30 seconds
+        return any(entry[0] == user_id for entry in action_list)
+
+
+
+
+
+
+    @commands.command(name="casinoTool")
+    @is_allowed_user(930513222820331590, PBot)
+    async def casinoTool(self, ctx, resultWin: bool):
+        stock_name = "P3:Casino"
+        reward_stock = "PokerChip"
+        cursor = self.conn.cursor()
+        addrDB = sqlite3.connect("P3addr.db")
+
+        P3Addr = get_p3_address(addrDB, ctx.author.id)
+
+        total_supply, current_supply = await get_supply_info(self, ctx, stock_name)
+        reward_supply, reward_current = await get_supply_info(self, ctx, reward_stock)
+
+        booster_amount = 50000000 if resultWin else 15000000
+        supply_boost = 15000000 if resultWin else 50000000
+
+        booster_amount = booster_amount * 2
+        supply_boost = supply_boost * 2
+
+        # Apply booster amount to total and available supply
+        total_supply += supply_boost * 2
+        current_supply += supply_boost * 2
+        reward_supply += supply_boost * 2
+        reward_current += supply_boost * 2
+
+        # Update the stock supply
+        await self.set_stock_supply(ctx, stock_name, total_supply, current_supply)
+        await self.set_stock_supply(ctx, reward_stock, reward_supply, reward_current)
+
+
+        reward_price = Decimal(await get_stock_price(self, ctx, reward_stock))
+        # Update the stock price
+        stock = cursor.execute("SELECT * FROM stocks WHERE symbol=?", (stock_name,)).fetchone()
+        if stock:
+            current_price = float(stock[2])
+
+            # Send an embed to the ledger channel
+            guild_id = 1161678765894664323
+            ledger_channel_id = 1161680453841993839
+            ledger_channel = ctx.guild.get_channel(ledger_channel_id)
+
+            if ledger_channel:
+                embed = discord.Embed(
+                    title=f"Shares Unlocked for {stock_name}",
+                    description=f"{supply_boost} shares have been unlocked for {stock_name}.",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Current Price", value=f"{current_price:,.2f} $QSE", inline=False)
+                embed.add_field(name="Total Supply", value=f"{total_supply:,.2f} shares", inline=True)
+                embed.add_field(name="Available Supply", value=f"{current_supply:,.2f} shares", inline=True)
+
+                await ledger_channel.send(embed=embed)
+
+                embed = discord.Embed(
+                    title=f"Shares Unlocked for {reward_stock}",
+                    description=f"{supply_boost} shares have been unlocked for {reward_stock}.",
+                    color=discord.Color.green()
+                )
+                embed.add_field(name="Current Price", value=f"{reward_price:,.2f} $QSE", inline=False)
+                embed.add_field(name="Total Supply", value=f"{reward_supply:,.2f} shares", inline=True)
+                embed.add_field(name="Available Supply", value=f"{reward_current:,.2f} shares", inline=True)
+
+                await ledger_channel.send(embed=embed)
+
+                cost = booster_amount * current_price
+                await self.buy_stock_for_bot(ctx, stock_name, booster_amount / 2)
+                await self.buy_stock_for_bot(ctx, reward_stock, booster_amount / 2)
+                await self.give_stock(ctx, P3Addr, reward_stock, (booster_amount / 2), False)
+                embed = discord.Embed(
+                    title=f"{reward_stock} Rewards",
+                    description=f"{supply_boost / 2:,} shares have been sent to {P3Addr}.",
+                    color=discord.Color.purple()
+                )
+
+                await ledger_channel.send(embed=embed)
+
+            reward_amount = (booster_amount / 2)
+
+            return reward_amount
+
+
+
+
+
+

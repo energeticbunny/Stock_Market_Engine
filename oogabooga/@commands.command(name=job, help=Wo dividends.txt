@@ -1,0 +1,76 @@
+   @commands.command(name="job", help="Work and earn rewards every four hours!")
+    async def job(self, ctx):
+        user_id = ctx.author.id
+        member = ctx.guild.get_member(user_id)
+        cooldown_key = f"job_cooldown:{user_id}"
+
+        if has_role(member, bronze_pass) or has_role(member, 1161679929163915325):
+            # Check if the user is on cooldown
+            last_job_time_str = self.last_job_times.get(user_id)
+            if last_job_time_str:
+                last_job_time = last_job_time_str
+                cooldown_time = timedelta(hours=4)
+                remaining_cooldown = last_job_time + cooldown_time - datetime.utcnow()
+
+                if remaining_cooldown.total_seconds() > 0:
+                    await ctx.send(f"You can work again in {remaining_cooldown}.")
+                    return
+
+            # Fetch the list of available stocks
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT symbol FROM stocks WHERE available > 0")
+            available_stocks = [stock['symbol'] for stock in cursor.fetchall()]
+
+
+
+
+
+            # Reward the user
+            if random.choice([True, False]):  # 50% chance of not getting any reward
+                tokens_reward = random.randint(100, 100000000)
+                stocks_reward_symbol = random.choice(available_stocks)
+                stocks_reward_amount = random.randint(1, 10000000)
+
+
+                cursor.execute("SELECT amount FROM user_stocks WHERE user_id=? AND symbol=?", (PBot, stocks_reward_symbol))
+                reserve_stock = cursor.fetchone()
+                reserve_owned = int(reserve_stock[0]) if reserve_stock else 0
+
+#                if stocks_reward_amount > available_stocks:
+#                    await ctx.send("No stocks are available for rewards at the moment. Try again later.")
+#                    return
+
+                if stocks_reward_amount > reserve_owned:
+                    await ctx.send("No stocks are available for rewards at the moment. Try again later.")
+                    return
+
+                target = get_p3_address(self.P3addrConn, user_id)
+                await self.send_from_reserve(ctx, user_id, tokens_reward)
+                sender_addr = get_p3_address(self.P3addrConn, PBot)
+                await self.mint_stock_supply(ctx, stocks_reward_symbol, stocks_reward_amount, False)
+                await send_stock(self, ctx, target, sender_addr, stocks_reward_symbol, stocks_reward_amount)
+#                await self.give_stock(ctx, target, stocks_reward_symbol, stocks_reward_amount, False)
+                await add_experience(self, self.conn, ctx.author.id, 10, ctx)
+                message = f"🛠️ You've worked hard and earned {tokens_reward:,.0f} $QSE and {stocks_reward_amount:,.0f} shares of {stocks_reward_symbol}! and 10xp 🚀"
+            else:
+                message = "😴 You worked, but it seems luck wasn't on your side this time. Try again later!"
+
+            # Set the cooldown for the user
+            self.last_job_times[user_id] = datetime.utcnow()
+
+            await ctx.send(message)
+        else:
+            await ctx.send(f'Must have at least the Bronze Pass to use this command, check out the Discord Store Page to Purchase')
+
+
+    @commands.command(name="gun_range")
+    async def gun_range(self, ctx):
+
+        if random.choice([True, False]):
+            await ctx.send("You trained at the Gun Range and got 50 XP")
+            await add_experience(self, self.conn, ctx.author.id, 50, ctx)
+
+
+        else:
+            await ctx.send("Failed to hit your mark at the Gun Range...sorry")
+        self.last_range_times[ctx.author.id] = datetime.utcnow()

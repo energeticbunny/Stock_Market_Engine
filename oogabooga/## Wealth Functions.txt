@@ -1,0 +1,146 @@
+## Wealth Functions
+
+    def get_username(self, ctx, user_id):
+        user = ctx.guild.get_member(user_id)
+        if user:
+            return user.display_name
+        else:
+            return f"User ID: {user_id}"
+
+
+    @commands.command(name='top_escrow_users', help='Show the top 10 users by total amount of shares in escrow.')
+    async def top_escrow_users(self, ctx):
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT user_id, SUM(quantity) as total_shares
+                FROM limit_orders
+                WHERE order_type = 'sell' OR order_type = 'buy'
+                GROUP BY user_id
+                ORDER BY total_shares DESC
+                LIMIT 10
+            """)
+
+            top_users = cursor.fetchall()
+
+            if top_users:
+                embed = discord.Embed(
+                    title="Top 10 Users by Total Shares in Escrow",
+                    color=discord.Color.gold()
+                )
+
+                for rank, (user_id, total_shares) in enumerate(top_users, start=1):
+                    p3addr = get_p3_address(self.P3addrConn, user_id)
+
+                    embed.add_field(
+                        name=f"{rank}. {p3addr}",
+                        value=f"Total Shares: {total_shares:,.0f}",
+                        inline=False
+                    )
+
+                await ctx.send(embed=embed)
+            else:
+                await ctx.send("No users found with shares in escrow.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while fetching top escrow users: {e}")
+
+
+    def calculate_total_wealth(self, user_id):
+        cursor = self.conn.cursor()
+
+        # Get user balance
+        cursor.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
+        current_balance_row = cursor.fetchone()
+        current_balance = current_balance_row[0] if current_balance_row else 0
+
+        # Calculate total stock value
+        cursor.execute("SELECT symbol, amount FROM user_stocks WHERE user_id=?", (user_id,))
+        user_stocks = cursor.fetchall()
+        total_stock_value = 0
+
+        for symbol, amount in user_stocks:
+            cursor.execute("SELECT price FROM stocks WHERE symbol=?", (symbol,))
+            stock_price_row = cursor.fetchone()
+            stock_price = stock_price_row[0] if stock_price_row else 0
+            total_stock_value += stock_price * amount
+
+        # Calculate total ETF value
+        cursor.execute("SELECT etf_id, quantity FROM user_etfs WHERE user_id=?", (user_id,))
+        user_etfs = cursor.fetchall()
+        total_etf_value = 0
+
+        for etf in user_etfs:
+            etf_id = etf[0]
+            quantity = etf[1]
+
+            cursor.execute("SELECT SUM(stocks.price * etf_stocks.quantity) FROM etf_stocks JOIN stocks ON etf_stocks.symbol = stocks.symbol WHERE etf_stocks.etf_id=? GROUP BY etf_stocks.etf_id", (etf_id,))
+            etf_value_row = cursor.fetchone()
+            etf_value = etf_value_row[0] if etf_value_row else 0
+            total_etf_value += (etf_value or 0) * quantity
+
+        return current_balance + total_stock_value + total_etf_value
+
+    def format_value(self, value):
+        if value >= 10 ** 15:
+            return f"{value / 10 ** 15:,.2f}Q"
+        elif value >= 10 ** 12:
+            return f"{value / 10 ** 12:,.2f}T"
+        elif value >= 10 ** 9:
+            return f"{value / 10 ** 9:,.2f}B"
+        elif value >= 10 ** 6:
+            return f"{value / 10 ** 6:,.2f}M"
+        else:
+            return f"{value:,.2f}"
+## End Wealth Functions
+
+  @commands.command(name='etf_metric', help='Show the current value and top holders of an ETF.')
+    async def etf_metric(self, ctx, etf_id: int):
+        try:
+            cursor = self.conn.cursor()
+
+            # Get the current value of the ETF
+            result = await get_etf_value(self, ctx, etf_id)
+            if result:
+                etf_value = result
+
+                # Get the number of holders for the ETF
+                cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_etfs WHERE etf_id = ? AND quantity > 0.0", (etf_id,))
+                num_holders = cursor.fetchone()[0]
+
+                # Get the top holders of the ETF with non-zero quantity
+                cursor.execute("""
+                    SELECT user_id, quantity
+                    FROM user_etfs
+                    WHERE etf_id = ? AND quantity > 0.0
+                    ORDER BY quantity DESC
+                    LIMIT 10
+                """, (etf_id,))
+                top_holders = cursor.fetchall()
+
+
+
+                # Calculate the total value of all held ETFs by users
+                cursor.execute("SELECT SUM(quantity) FROM user_etfs WHERE etf_id = ? AND quantity > 0.0", (etf_id,))
+                total_value = cursor.fetchone()[0] * etf_value
+
+                embed = Embed(title=f"ETF Metrics for ETF ID {etf_id}", color=discord.Color.green())
+                embed.add_field(name="Current Value", value=f"{etf_value:,.2f} $QSE", inline=False)
+                embed.add_field(name="Number of Holders", value=num_holders, inline=False)
+
+                if top_holders:
+                    top_holders_str = "\n".join([f"{generate_crypto_address(user_id)} - {quantity:,.2f} shares" for user_id, quantity in top_holders])
+                    embed.add_field(name="Top Holders", value=top_holders_str, inline=False)
+                else:
+                    embed.add_field(name="Top Holders", value="No one currently holds shares in this ETF.", inline=False)
+
+                # Include the total value in the footer
+                embed.set_footer(text=f"Total Value of Held ETFs: {total_value:,.2f} $QSE")
+
+                await ctx.send(embed=embed)
+
+            else:
+                await ctx.send(f"ETF with ID {etf_id} does not exist.")
+
+        except sqlite3.Error as e:
+            await ctx.send(f"An error occurred while fetching ETF information: {e}")
